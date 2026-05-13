@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+<head>
+  <meta charset="UTF-8"/>
+  <title>每日 arXiv — 设置</title>
+  <style>
+    html, body { min-width: 720px; min-height: 640px; }
+    body { font-family: message-box; font-size: 13px; margin: 16px; background: -moz-Dialog; color: -moz-DialogText; }
+    h2 { font-size: 16px; margin: 0 0 12px 0; }
+    .section { margin-bottom: 20px; padding: 12px; border: 1px solid ThreeDShadow; border-radius: 6px; background: -moz-Field; }
+    .section-title { font-weight: 600; font-size: 14px; margin-bottom: 10px; cursor: pointer; user-select: none; }
+    .section-title:hover { color: -moz-HyperlinkText; }
+    .field-row { display: flex; align-items: center; margin-bottom: 8px; gap: 8px; }
+    .field-row label { min-width: 120px; text-align: right; font-size: 12px; }
+    .field-row input, .field-row select, .field-row textarea { flex: 1; padding: 4px 6px; border: 1px solid ThreeDShadow; border-radius: 3px; font-size: 12px; }
+    .field-row textarea { min-height: 60px; }
+    .hint { font-size: 11px; color: GrayText; margin-left: 128px; margin-top: -4px; margin-bottom: 8px; }
+    .btn-row { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
+    .btn-row button { padding: 6px 16px; }
+    .collapsible { overflow: hidden; transition: max-height 0.2s; }
+    .collapsible.collapsed { max-height: 0; }
+    .check-result { font-size: 12px; margin: 2px 0; padding: 2px 8px; border-radius: 3px; }
+    .check-pass { background: #e8f5e9; color: #2e7d32; }
+    .check-fail { background: #ffebee; color: #c62828; }
+    #env-test-results { max-height: 300px; overflow-y: auto; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>每日 arXiv — 设置</h2>
+
+  <!-- Basic config -->
+  <div id="section-basic" class="section">
+    <div class="section-title" onclick="toggleSection('section-basic-content')">▾ 基础配置</div>
+    <div id="section-basic-content">
+      <div class="field-row">
+        <label>LLM Provider</label>
+        <select id="cfg-llm-provider">
+          <option value="">— 选择 —</option>
+          <option value="openai">OpenAI</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="gemini">Gemini</option>
+          <option value="azure">Azure OpenAI</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label>API Style</label>
+        <select id="cfg-api-style">
+          <option value="openai">OpenAI-compatible</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="gemini">Gemini</option>
+          <option value="azure_openai">Azure OpenAI</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label>API Key</label>
+        <input type="password" id="cfg-api-key" placeholder="sk-... 或环境变量名" />
+      </div>
+      <div class="field-row">
+        <label>Model</label>
+        <input type="text" id="cfg-model" placeholder="e.g. gpt-4o" />
+      </div>
+      <div class="field-row">
+        <label>Base URL</label>
+        <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" />
+      </div>
+      <div class="field-row">
+        <label>界面语言</label>
+        <select id="cfg-locale">
+          <option value="">跟随 Zotero</option>
+          <option value="zh-CN">简体中文</option>
+          <option value="en-US">English</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label>报告语言</label>
+        <select id="cfg-report-locale">
+          <option value="">跟随界面语言</option>
+          <option value="zh-CN">简体中文</option>
+          <option value="en-US">English</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label>时区</label>
+        <input type="text" id="cfg-timezone" placeholder="Asia/Shanghai" />
+      </div>
+      <div class="field-row">
+        <label>提醒时间</label>
+        <input type="time" id="cfg-reminder-time" value="10:00" />
+      </div>
+    </div>
+  </div>
+
+  <!-- arXiv Categories -->
+  <div id="section-categories" class="section">
+    <div class="section-title" onclick="toggleSection('section-categories-content')">▾ arXiv 分区</div>
+    <div id="section-categories-content">
+      <div class="field-row">
+        <label>核心分区</label>
+        <textarea id="cfg-core-categories" placeholder="每行一个, e.g. cond-mat.supr-con"></textarea>
+      </div>
+      <div class="field-row">
+        <label>交叉分区</label>
+        <textarea id="cfg-cross-categories" placeholder="每行一个"></textarea>
+      </div>
+      <div class="hint">LLM 建议的分区会显示在这里作为草稿</div>
+    </div>
+  </div>
+
+  <!-- Advanced config -->
+  <div id="section-advanced" class="section">
+    <div class="section-title" onclick="toggleSection('section-advanced-content')">▸ 高级配置</div>
+    <div id="section-advanced-content" class="collapsible collapsed">
+      <div class="field-row">
+        <label>抓取数量</label>
+        <input type="number" id="cfg-page-size" min="10" max="200" />
+      </div>
+      <div class="field-row">
+        <label>请求间隔 (ms)</label>
+        <input type="number" id="cfg-request-interval" min="500" step="100" />
+      </div>
+      <div class="field-row">
+        <label>重试次数</label>
+        <input type="number" id="cfg-retry-max" min="0" max="10" />
+      </div>
+      <div class="field-row">
+        <label>LLM 最低分</label>
+        <input type="number" id="cfg-llm-min-score" min="1" max="5" />
+      </div>
+      <div class="field-row">
+        <label>缓存保留 (天)</label>
+        <input type="number" id="cfg-cache-days" min="1" max="365" />
+      </div>
+      <div class="field-row">
+        <label>自动下载 PDF</label>
+        <input type="checkbox" id="cfg-auto-pdf" style="flex:none;margin-left:4px;" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Environment Test -->
+  <div id="section-envtest" class="section">
+    <div class="section-title" onclick="toggleSection('section-envtest-content')">▸ 环境测试</div>
+    <div id="section-envtest-content" class="collapsible collapsed">
+      <button onclick="runEnvTest()">运行环境测试</button>
+      <div id="env-test-results"></div>
+    </div>
+  </div>
+
+  <!-- Buttons -->
+  <div class="btn-row">
+    <button onclick="window.close()">取消</button>
+    <button onclick="saveSettings()">保存</button>
+  </div>
+
+  <script type="application/javascript">
+//<![CDATA[
+// Settings dialog controller — receives plugin sandbox objects via window.arguments.
+// (External script loading not reliable via jar: URI, so inlined here.)
+
+function getDialogArgs() {
+  if (window.arguments && window.arguments.length && window.arguments[0]) {
+    return window.arguments[0];
+  }
+  return {};
+}
+
+function toggleSection(contentId) {
+  var el = document.getElementById(contentId);
+  if (!el) return;
+  var isCollapsed = el.classList.contains("collapsed");
+  el.classList.toggle("collapsed");
+  var title = el.previousElementSibling;
+  if (title) {
+    var prefix = isCollapsed ? "▾ " : "▸ ";
+    title.textContent = prefix + title.textContent.substring(2);
+  }
+}
+
+function getConfig() {
+  var args = getDialogArgs();
+  return args.config ||
+         (window.opener && window.opener.ArxivDailyConfig) ||
+         (window.parent && window.parent.ArxivDailyConfig) ||
+         (typeof ArxivDailyConfig !== "undefined" && ArxivDailyConfig);
+}
+
+function setVal(id, val) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  if (el.type === "checkbox") el.checked = !!val;
+  else el.value = val;
+}
+
+function getVal(id) {
+  var el = document.getElementById(id);
+  if (!el) return "";
+  if (el.type === "checkbox") return el.checked;
+  return el.value;
+}
+
+function loadSettings() {
+  var cfg = getConfig();
+  if (!cfg) return;
+
+  setVal("cfg-llm-provider", cfg.get("llm.provider") || "");
+  setVal("cfg-api-style", cfg.get("llm.apiStyle") || "openai");
+  setVal("cfg-api-key", cfg.get("llm.apiKey") || "");
+  setVal("cfg-model", cfg.get("llm.model") || "");
+  setVal("cfg-base-url", cfg.get("llm.baseUrl") || "");
+  setVal("cfg-locale", cfg.get("ui.locale") || "");
+  setVal("cfg-report-locale", cfg.get("ui.reportLocale") || "");
+  setVal("cfg-timezone", cfg.get("ui.timezone") || "");
+  setVal("cfg-reminder-time", cfg.get("ui.reminderTime") || "10:00");
+
+  var core = cfg.get("arxiv.coreCategories") || [];
+  setVal("cfg-core-categories", core.join("\n"));
+  var cross = cfg.get("arxiv.crossCategories") || [];
+  setVal("cfg-cross-categories", cross.join("\n"));
+
+  setVal("cfg-page-size", cfg.get("arxiv.pageSize") || 50);
+  setVal("cfg-request-interval", cfg.get("arxiv.requestIntervalMs") || 3000);
+  setVal("cfg-retry-max", cfg.get("arxiv.retryMax") || 3);
+  setVal("cfg-llm-min-score", cfg.get("screening.llmMinScore") || 3);
+  setVal("cfg-cache-days", cfg.get("cache.retentionDays") || 30);
+  document.getElementById("cfg-auto-pdf").checked = cfg.get("pdf.autoDownload") || false;
+}
+
+function saveSettings() {
+  var cfg = getConfig();
+  if (!cfg) { alert("Config not available"); return; }
+
+  cfg.set("llm.provider", getVal("cfg-llm-provider"));
+  cfg.set("llm.apiStyle", getVal("cfg-api-style"));
+  cfg.set("llm.apiKey", getVal("cfg-api-key"));
+  cfg.set("llm.model", getVal("cfg-model"));
+  cfg.set("llm.baseUrl", getVal("cfg-base-url"));
+  cfg.set("ui.locale", getVal("cfg-locale"));
+  cfg.set("ui.reportLocale", getVal("cfg-report-locale"));
+  cfg.set("ui.timezone", getVal("cfg-timezone"));
+  cfg.set("ui.reminderTime", getVal("cfg-reminder-time"));
+
+  var coreText = getVal("cfg-core-categories");
+  cfg.set("arxiv.coreCategories", coreText.split("\n").map(function(s) { return s.trim(); }).filter(function(s) { return s; }));
+  var crossText = getVal("cfg-cross-categories");
+  cfg.set("arxiv.crossCategories", crossText.split("\n").map(function(s) { return s.trim(); }).filter(function(s) { return s; }));
+
+  cfg.set("arxiv.pageSize", parseInt(getVal("cfg-page-size"), 10) || 50);
+  cfg.set("arxiv.requestIntervalMs", parseInt(getVal("cfg-request-interval"), 10) || 3000);
+  cfg.set("arxiv.retryMax", parseInt(getVal("cfg-retry-max"), 10) || 3);
+  cfg.set("screening.llmMinScore", parseInt(getVal("cfg-llm-min-score"), 10) || 3);
+  cfg.set("cache.retentionDays", parseInt(getVal("cfg-cache-days"), 10) || 30);
+  cfg.set("pdf.autoDownload", getVal("cfg-auto-pdf"));
+
+  cfg.save();
+  window.close();
+}
+
+function getEnvTest() {
+  var args = getDialogArgs();
+  return args.envTest ||
+         (window.opener && window.opener.ArxivDailyEnvTest) ||
+         (window.parent && window.parent.ArxivDailyEnvTest) ||
+         (typeof ArxivDailyEnvTest !== "undefined" && ArxivDailyEnvTest);
+}
+
+async function runEnvTest() {
+  var resultsDiv = document.getElementById("env-test-results");
+  if (!resultsDiv) return;
+  resultsDiv.innerHTML = "<p style='color:GrayText;'>Running...</p>";
+
+  var envTest = getEnvTest();
+  if (!envTest) {
+    resultsDiv.innerHTML = "<p class='check-fail'>EnvTest module not available</p>";
+    return;
+  }
+
+  var results = await envTest.runAll();
+  var html = "";
+  for (var i = 0; i < results.length; i++) {
+    var r = results[i];
+    html += "<div class='check-result " + (r.passed ? "check-pass" : "check-fail") + "'>";
+    html += (r.passed ? "✓ " : "✗ ") + r.name;
+    if (r.detail) html += " — " + r.detail;
+    html += "</div>";
+  }
+  resultsDiv.innerHTML = html;
+}
+
+function ensureDialogSize() {
+  try {
+    if (window.outerWidth < 720 || window.outerHeight < 640) {
+      window.resizeTo(760, 720);
+    }
+  } catch (e) {}
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  ensureDialogSize();
+  loadSettings();
+});
+//]]>
+</script>
+</body>
+</html>

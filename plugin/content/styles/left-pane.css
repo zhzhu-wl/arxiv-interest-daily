@@ -1,0 +1,184 @@
+/* Zotero arXiv Interest Daily — Left Pane Styles */
+
+#arxiv-daily-left-panels {
+  background: var(--material-sidepane);
+  border-bottom: 1px solid var(--material-panedivider);
+}
+
+#arxiv-daily-top-splitter {
+  -moz-appearance: none;
+  cursor: ns-resize;
+  border-top: 1px solid var(--material-panedivider);
+  border-bottom: 1px solid var(--material-panedivider);
+}
+
+#arxiv-daily-top-splitter:hover {
+  background: linear-gradient(to bottom, transparent 0, transparent 2px, rgba(76, 111, 143, .35) 2px, rgba(76, 111, 143, .35) 4px, transparent 4px) !important;
+}
+
+#arxiv-daily-project-papers,
+#arxiv-daily-reports {
+  overflow: hidden;
+}
+
+#arxiv-daily-project-papers label,
+#arxiv-daily-reports label {
+  color: var(--fill-primary);
+  user-select: none;
+}
+
+#arxiv-daily-splitter {
+  -moz-appearance: none;
+  cursor: ns-resize;
+  border-top: 1px solid var(--material-panedivider);
+  border-bottom: 1px solid var(--material-panedivider);
+}
+
+#arxiv-daily-splitter:hover {
+  background: linear-gradient(to bottom, transparent 0, transparent 2px, rgba(76, 111, 143, .35) 2px, rgba(76, 111, 143, .35) 4px, transparent 4px) !important;
+}
+
+/* Button bar styles */
+#arxiv-daily-button-bar {
+  background: var(--material-sidepane);
+  border-bottom: 1px solid var(--material-panedivider);
+}
+
+#ari-btn-brand {
+  flex-shrink: 1;
+}
+
+#ari-btn-brand image {
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  max-width: 22px;
+}
+
+#arxiv-daily-button-group {
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+#arxiv-daily-button-group .arxiv-daily-btn,
+#ari-btn-generate-model {
+  flex: 0 0 auto;
+}
+
+.arxiv-daily-btn[disabled="true"] {
+  opacity: 0.35;
+  cursor: default !important;
+}
+
+/* Tree styles */
+#arxiv-daily-project-papers tree,
+#arxiv-daily-reports tree {
+  border: none;
+  margin: 0;
+  background: var(--material-sidepane);
+}
+
+#arxiv-daily-project-papers treecols,
+#arxiv-daily-reports treecols {
+  height: 0;
+  min-height: 0;
+  max-height: 0;
+  overflow: hidden;
+}
+
+#arxiv-daily-project-papers treecol,
+#arxiv-daily-reports treecol {
+  min-height: 0;
+  height: 0;
+  max-height: 0;
+  border: 0;
+  padding: 0;
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-row,
+#arxiv-daily-reports treechildren::-moz-tree-row {
+  min-height: 22px;
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-indentation,
+#arxiv-daily-reports treechildren::-moz-tree-indentation {
+  width: 18px;
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-cell(ari-current),
+#arxiv-daily-reports treechildren::-moz-tree-cell(ari-current) {
+  background: var(--fill-quinary);
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-cell-text(ari-current),
+#arxiv-daily-reports treechildren::-moz-tree-cell-text(ari-current) {
+  color: var(--fill-primary);
+  font-weight: 600;
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-image(ari-folder),
+#arxiv-daily-reports treechildren::-moz-tree-image(ari-folder) {
+  list-style-image: url("chrome://zotero/skin/16/universal/folder.svg");
+  width: 16px;
+  height: 16px;
+  -moz-context-properties: fill, fill-opacity;
+  fill: var(--fill-secondary);
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-image(ari-folder-open),
+#arxiv-daily-reports treechildren::-moz-tree-image(ari-folder-open) {
+  list-style-image: url("chrome://zotero/skin/16/universal/folder-open.svg");
+  width: 16px;
+  height: 16px;
+  -moz-context-properties: fill, fill-opacity;
+  fill: var(--fill-secondary);
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-image(ari-collection),
+#arxiv-daily-reports treechildren::-moz-tree-image(ari-collection) {
+  list-style-image: url("chrome://zotero/skin/collection-tree/16/light/collection.svg");
+  width: 16px;
+  height: 16px;
+}
+
+#arxiv-daily-project-papers treechildren::-moz-tree-cell-text(ari-leaf),
+#arxiv-daily-reports treechildren::-moz-tree-cell-text(ari-leaf) {
+  color: var(--fill-primary);
+}
+
+.arxiv-daily-folder-open-button {
+  min-width: 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin: 0 2px;
+  border: 0;
+  background: transparent;
+}
+
+.arxiv-daily-folder-open-button:hover {
+  background: var(--fill-quinary);
+}
+
+.arxiv-daily-pane-close-button {
+  min-width: 20px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  margin: 0 0 0 2px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fill-secondary);
+  cursor: pointer;
+}
+
+.arxiv-daily-pane-close-button:hover {
+  border-color: var(--material-panedivider);
+  background: var(--fill-quinary);
+  color: var(--fill-primary);
+}
+
+button:not([disabled]),
+toolbarbutton:not([disabled="true"]) {
+  cursor: pointer;
+}

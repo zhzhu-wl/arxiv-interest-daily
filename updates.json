@@ -1,0 +1,19 @@
+{
+  "addons": {
+    "arxiv-interest-daily@zotero": {
+      "updates": [
+        {
+          "version": "1.1.0",
+          "update_link": "https://github.com/zhzhu-wl/arxiv-interest-daily/releases/download/v1.1.0/arxiv-interest-daily-v1.1.0.xpi",
+          "update_hash": "sha256:2c8f085d429477428123d9878d20e6cf54f9b2efb25e147ccf7212a1d48caea3",
+          "applications": {
+            "zotero": {
+              "strict_min_version": "9.0",
+              "strict_max_version": "9.0.*"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

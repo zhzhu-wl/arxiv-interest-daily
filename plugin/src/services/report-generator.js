@@ -1,0 +1,1399 @@
+/* ==========================================================================
+ * services/report-generator.js — Full report generation pipeline
+ *
+ * Orchestrates: fetch → keyword score → LLM screen → deep read → write report
+ * Ported from arxiv_daily.py (~3000 lines of logic).
+ * ========================================================================== */
+
+"use strict";
+
+(function () {
+  const LOG_PREFIX = "arxiv-interest-daily";
+
+  function log(msg) {
+    const text = "[" + LOG_PREFIX + "] " + msg;
+    if (typeof Zotero.debug === "function") Zotero.debug(text);
+    else if (typeof Zotero.log === "function") Zotero.log(text);
+  }
+
+  function logError(msg) {
+    if (typeof Zotero.logError === "function") Zotero.logError(msg);
+    else log("ERROR: " + msg);
+  }
+
+  function emitProgress(onProgress, step, pct) {
+    if (typeof onProgress !== "function" || !step) return;
+    try {
+      onProgress(step, pct);
+    } catch (e) {}
+  }
+
+  function stageError(prefix, err) {
+    var msg = err && err.message ? err.message : String(err);
+    if (msg.indexOf(prefix + ": ") === 0) return err;
+    return new Error(prefix + ": " + msg);
+  }
+
+  function getDateStr() {
+    var now = new Date();
+    var y = now.getFullYear();
+    var m = String(now.getMonth() + 1).padStart(2, "0");
+    var d = String(now.getDate()).padStart(2, "0");
+    return y + "-" + m + "-" + d;
+  }
+
+  function formatDate(dateStr) {
+    var p = dateStr.split("-");
+    return p[0] + "年" + p[1] + "月" + p[2] + "日";
+  }
+
+  function datePart(value) {
+    var match = String(value || "").match(/\d{4}-\d{2}-\d{2}/);
+    return match ? match[0] : "";
+  }
+
+  function paperPublicationDate(paper) {
+    // Announcement date is arXiv's daily publish/listing date. API `published`
+    // can reflect the submission timestamp, which may fall on the evening
+    // before the announced publication day.
+    return datePart(paper && paper.announcementDate) ||
+      datePart(paper && paper.published) ||
+      datePart(paper && paper.updated);
+  }
+
+  function inferReportDateFromPapers(papers) {
+    var counts = {};
+    var best = "";
+    var bestCount = 0;
+    for (var i = 0; i < (papers || []).length; i++) {
+      var date = paperPublicationDate(papers[i]);
+      if (!date) continue;
+      counts[date] = (counts[date] || 0) + 1;
+      if (counts[date] > bestCount || (counts[date] === bestCount && date > best)) {
+        best = date;
+        bestCount = counts[date];
+      }
+    }
+    return best;
+  }
+
+  function baseArxivId(value) {
+    return String(value || "")
+      .trim()
+      .replace(/^arXiv:/i, "")
+      .replace(/^https?:\/\/arxiv\.org\/(?:abs|pdf)\//i, "")
+      .split(/[?#]/)[0]
+      .replace(/\.pdf$/i, "")
+      .replace(/v\d+$/i, "");
+  }
+
+  function dedupePapers(papers) {
+    var seen = {};
+    var unique = [];
+    for (var i = 0; i < papers.length; i++) {
+      var p = papers[i];
+      var id = baseArxivId(p.arxivId);
+      if (!id) continue;
+      p.arxivId = id;
+
+      if (!seen[id]) {
+        seen[id] = p;
+        unique.push(p);
+        continue;
+      }
+
+      var existing = seen[id];
+      if (!existing.title && p.title) existing.title = p.title;
+      if (!existing.abstract && p.abstract) existing.abstract = p.abstract;
+      if (!existing.authors && p.authors) existing.authors = p.authors;
+      if (!existing.categories && p.categories) existing.categories = p.categories;
+      if (!existing.primaryCategory && p.primaryCategory) existing.primaryCategory = p.primaryCategory;
+      if (!existing.sourceCategory && p.sourceCategory) existing.sourceCategory = p.sourceCategory;
+    }
+    return unique;
+  }
+
+  function clampScore(value, fallback) {
+    var n = parseInt(value, 10);
+    if (!Number.isFinite(n)) n = fallback || 1;
+    return Math.max(1, Math.min(5, n));
+  }
+
+  function truthy(value) {
+    if (typeof value === "string") {
+      return /^(true|1|yes|y|keep)$/i.test(value.trim());
+    }
+    return !!value;
+  }
+
+  function tagsFrom(value) {
+    if (Array.isArray(value)) {
+      return value.map(function (tag) { return String(tag || "").trim(); }).filter(Boolean);
+    }
+    if (typeof value === "string") {
+      return value.split(/[,;，、]/).map(function (tag) { return tag.trim(); }).filter(Boolean);
+    }
+    return [];
+  }
+
+  function ensureKeywordScores(papers) {
+    if (typeof ArxivDailyKeywords === "undefined" || !ArxivDailyKeywords.scorePaper) return;
+    for (var i = 0; i < papers.length; i++) {
+      if (!Number.isFinite(parseFloat(papers[i].keywordScore))) {
+        papers[i].keywordScore = ArxivDailyKeywords.scorePaper(papers[i]);
+      }
+    }
+  }
+
+  function fallbackScore(paper) {
+    var keywordScore = parseInt(paper && paper.keywordScore, 10);
+    if (!Number.isFinite(keywordScore)) keywordScore = 0;
+    return Math.max(1, Math.min(5, Math.floor(keywordScore / 3) + 1));
+  }
+
+  function stripJSONFence(text) {
+    var raw = String(text || "").trim();
+    raw = raw.replace(/^```(?:json|JSON)?\s*/, "").replace(/\s*```$/, "").trim();
+    return raw;
+  }
+
+  function parseLLMSelectionResponse(text) {
+    var raw = stripJSONFence(text);
+    var parsed = null;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      var start = raw.indexOf("[");
+      var end = raw.lastIndexOf("]");
+      if (start < 0 || end <= start) throw e;
+      parsed = JSON.parse(raw.slice(start, end + 1));
+    }
+
+    if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
+      parsed = parsed.papers || parsed.results || parsed.items || parsed.selections || parsed.data;
+    }
+    if (!Array.isArray(parsed)) {
+      throw new Error("LLM selection response is not a JSON array");
+    }
+    return parsed.filter(function (item) {
+      return item && typeof item === "object";
+    });
+  }
+
+  function paperById(papers, id) {
+    var target = baseArxivId(id);
+    if (!target) return null;
+    for (var i = 0; i < papers.length; i++) {
+      if (baseArxivId(papers[i].arxivId) === target) return papers[i];
+    }
+    return null;
+  }
+
+  function resolveSelectionPaper(item, localIndex, batch, candidates) {
+    var rawId = item.arxiv_id || item.arxivId || item.paper_id || item.paperId || item.id || "";
+    var numeric = parseInt(rawId, 10);
+    if (Number.isFinite(numeric) && String(rawId).trim().match(/^\d+$/)) {
+      if (numeric >= batch.startIdx + 1 && numeric <= batch.startIdx + batch.batchSize) {
+        return candidates[numeric - 1] || null;
+      }
+      if (numeric >= 1 && numeric <= batch.batchSize) {
+        return candidates[batch.startIdx + numeric - 1] || null;
+      }
+    }
+
+    var byId = paperById(candidates, rawId);
+    if (byId) return byId;
+    return candidates[batch.startIdx + localIndex] || null;
+  }
+
+  function applySelection(paper, selection, fallbackReason) {
+    var score = clampScore(selection && selection.score, fallbackScore(paper));
+    paper.llmScore = score;
+    paper.selectionScore = score;
+    paper.selectionKeep = selection && selection.keep !== undefined
+      ? truthy(selection.keep)
+      : score >= 3;
+    paper.selectionCross = !!(selection && (
+      selection.is_cross_discipline ||
+      selection.isCrossDiscipline ||
+      selection.cross ||
+      selection.selection_cross
+    ));
+    paper.llmReason = String(
+      (selection && (selection.reason || selection.relevance || selection.summary)) ||
+      fallbackReason ||
+      ""
+    ).trim();
+    paper.llmTags = tagsFrom(selection && selection.tags);
+    return paper;
+  }
+
+  function fallbackSelectionBatch(batch, candidates, reason, minKeepScore, keepAll) {
+    var selected = [];
+    var threshold = Number.isFinite(parseFloat(minKeepScore)) ? parseFloat(minKeepScore) : 3;
+    for (var i = 0; i < batch.batchSize; i++) {
+      var paper = candidates[batch.startIdx + i];
+      if (!paper) continue;
+      var score = fallbackScore(paper);
+      selected.push(applySelection(Object.assign({}, paper), {
+        score: score,
+        keep: !!keepAll || score >= threshold,
+        reason: reason || "LLM 筛选结果不可解析，已按关键词分数兜底。",
+        tags: [],
+      }));
+    }
+    return selected;
+  }
+
+  function parseBatchSelections(batchResults, candidates, options) {
+    options = options || {};
+    var records = [];
+    var parseFailures = 0;
+    var label = options.label || "LLM";
+    var minKeepScore = Number.isFinite(parseFloat(options.minKeepScore)) ? parseFloat(options.minKeepScore) : 3;
+    var fallbackReason = options.fallbackReason || "LLM 结果不可解析，已按关键词分数兜底。";
+    var missingReason = options.missingReason || fallbackReason;
+    var onProgress = options.onProgress;
+    var progressStart = Number.isFinite(parseFloat(options.progressStart)) ? parseFloat(options.progressStart) : 52;
+    var progressStep = Number.isFinite(parseFloat(options.progressStep)) ? parseFloat(options.progressStep) : 4;
+    var progressMax = Number.isFinite(parseFloat(options.progressMax)) ? parseFloat(options.progressMax) : 22;
+    var totalBatches = batchResults.length || 0;
+
+    for (var b = 0; b < batchResults.length; b++) {
+      emitProgress(onProgress, "解析 " + label + " 结果: 第 " + (b + 1) + "/" + totalBatches + " 批", progressStart + Math.min(progressMax, b * progressStep));
+      var response = batchResults[b].response;
+      try {
+        var parsed = parseLLMSelectionResponse(response);
+        var parsedCount = 0;
+        var seenInBatch = {};
+        for (var p = 0; p < parsed.length; p++) {
+          var paper = resolveSelectionPaper(parsed[p], p, batchResults[b], candidates);
+          if (paper) {
+            seenInBatch[baseArxivId(paper.arxivId)] = true;
+            records.push(applySelection(Object.assign({}, paper), parsed[p]));
+            parsedCount++;
+          }
+        }
+        if (parsedCount === 0) {
+          parseFailures++;
+          records = records.concat(fallbackSelectionBatch(
+            batchResults[b],
+            candidates,
+            fallbackReason,
+            minKeepScore,
+            options.fallbackKeepAll
+          ));
+        } else if (parsedCount < batchResults[b].batchSize) {
+          for (var miss = 0; miss < batchResults[b].batchSize; miss++) {
+            var missingPaper = candidates[batchResults[b].startIdx + miss];
+            if (!missingPaper || seenInBatch[baseArxivId(missingPaper.arxivId)]) continue;
+            var score = fallbackScore(missingPaper);
+            records.push(applySelection(Object.assign({}, missingPaper), {
+              score: score,
+              keep: !!options.fallbackKeepAll || score >= minKeepScore,
+              reason: missingReason,
+              tags: [],
+            }));
+          }
+        }
+        emitProgress(onProgress, label + " 第 " + (b + 1) + " 批解析完成: " + parsedCount + "/" + batchResults[b].batchSize + " 篇", progressStart + 4 + Math.min(progressMax, b * progressStep));
+      } catch (e) {
+        parseFailures++;
+        logError(label + " parse error in batch " + b + ": " + (e.message || e));
+        records = records.concat(fallbackSelectionBatch(
+          batchResults[b],
+          candidates,
+          fallbackReason,
+          minKeepScore,
+          options.fallbackKeepAll
+        ));
+        emitProgress(onProgress, label + " 第 " + (b + 1) + " 批解析失败，已使用宽松兜底: " + (e.message || e), progressStart + 4 + Math.min(progressMax, b * progressStep));
+      }
+    }
+
+    return { records: records, parseFailures: parseFailures };
+  }
+
+  function aggregateScreened(records, minScore) {
+    var map = {};
+    var order = [];
+    for (var i = 0; i < (records || []).length; i++) {
+      var record = records[i];
+      var key = paperKey(record);
+      if (!key) continue;
+      if (!map[key]) {
+        map[key] = {
+          paper: Object.assign({}, record),
+          count: 0,
+          scoreSum: 0,
+          keepCount: 0,
+          crossCount: 0,
+          reasons: [],
+          tags: {},
+        };
+        order.push(key);
+      }
+      var agg = map[key];
+      var score = clampScore(record.selectionScore || record.llmScore || fallbackScore(record), fallbackScore(record));
+      agg.count++;
+      agg.scoreSum += score;
+      if (record.selectionKeep || score >= minScore) agg.keepCount++;
+      if (record.selectionCross) agg.crossCount++;
+      if (record.llmReason && agg.reasons.indexOf(record.llmReason) < 0) agg.reasons.push(record.llmReason);
+      var tags = record.llmTags || [];
+      for (var t = 0; t < tags.length; t++) {
+        if (tags[t]) agg.tags[tags[t]] = true;
+      }
+    }
+
+    var out = [];
+    for (var k = 0; k < order.length; k++) {
+      var item = map[order[k]];
+      var avg = item.count ? item.scoreSum / item.count : fallbackScore(item.paper);
+      var rounded = clampScore(Math.round(avg), fallbackScore(item.paper));
+      var keepMajority = item.keepCount >= Math.ceil(item.count / 2);
+      item.paper.llmScore = rounded;
+      item.paper.selectionScore = rounded;
+      item.paper.selectionAverageScore = Math.round(avg * 10) / 10;
+      item.paper.selectionPassCount = item.count;
+      item.paper.selectionKeep = keepMajority || avg >= minScore;
+      item.paper.selectionCross = item.crossCount >= Math.ceil(item.count / 2);
+      item.paper.llmReason = [
+        item.count > 1 ? "多轮筛选平均 " + item.paper.selectionAverageScore + "/5，" + item.keepCount + "/" + item.count + " 轮建议保留。" : "",
+        item.reasons.slice(0, 2).join("；"),
+      ].filter(Boolean).join(" ");
+      item.paper.llmTags = Object.keys(item.tags);
+      out.push(item.paper);
+    }
+    return out;
+  }
+
+  function markPrefilterResults(papers, minScore) {
+    var threshold = Number.isFinite(parseFloat(minScore)) ? parseFloat(minScore) : 2;
+    for (var i = 0; i < (papers || []).length; i++) {
+      var paper = papers[i];
+      var score = paper.selectionScore || paper.llmScore || fallbackScore(paper);
+      paper.prefilterScore = score;
+      paper.prefilterAverageScore = paper.selectionAverageScore || score;
+      paper.prefilterPassCount = paper.selectionPassCount || 1;
+      paper.prefilterKeep = !!paper.selectionKeep || score >= threshold;
+      paper.prefilterReason = paper.llmReason || "";
+    }
+    return papers || [];
+  }
+
+  function scoreSort(a, b) {
+    return ((b.selectionScore || b.llmScore || 0) - (a.selectionScore || a.llmScore || 0)) ||
+      ((b.keywordScore || 0) - (a.keywordScore || 0));
+  }
+
+  function paperMatchesCategories(paper, categories) {
+    if (!categories || !categories.length) return false;
+    var text = [paper.categories || "", paper.primaryCategory || "", paper.sourceCategory || ""].join("; ");
+    return categories.some(function (cat) {
+      return text.indexOf(cat) >= 0;
+    });
+  }
+
+  function authorList(value) {
+    if (Array.isArray(value)) {
+      return value.map(function (author) {
+        if (typeof author === "string") return author.trim();
+        if (author && typeof author === "object") {
+          return String(author.name ||
+            [author.firstName || "", author.lastName || ""].join(" ").trim() ||
+            author.fullName ||
+            "").trim();
+        }
+        return "";
+      }).filter(Boolean);
+    }
+    return String(value || "")
+      .split(/\s*;\s*|\s*,\s+(?=[A-Z][A-Za-z.\-]+\s)|\s+and\s+/)
+      .map(function (author) { return author.trim(); })
+      .filter(Boolean);
+  }
+
+  function normalizeName(value) {
+    return String(value || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+  }
+
+  function correspondingAuthorNames(paper) {
+    var raw = paper.correspondingAuthors ||
+      paper.correspondingAuthor ||
+      paper.corresponding ||
+      paper.correspondence ||
+      [];
+    return authorList(raw);
+  }
+
+  function firstAuthorNames(paper) {
+    var raw = paper.firstAuthors ||
+      paper.firstAuthor ||
+      paper.first_author ||
+      paper.first_authors ||
+      [];
+    return authorList(raw);
+  }
+
+  function formatAuthors(paper) {
+    var authors = authorList(paper.authors);
+    if (!authors.length) return "";
+    var firstAuthors = firstAuthorNames(paper);
+    var corresponding = correspondingAuthorNames(paper);
+    var firstMap = {};
+    var correspondingMap = {};
+    for (var f = 0; f < firstAuthors.length; f++) {
+      firstMap[normalizeName(firstAuthors[f])] = true;
+    }
+    for (var c = 0; c < corresponding.length; c++) {
+      correspondingMap[normalizeName(corresponding[c])] = true;
+    }
+
+    var formatted = authors.map(function (author) {
+      var marks = [];
+      if (firstMap[normalizeName(author)]) marks.push("第一作者");
+      if (correspondingMap[normalizeName(author)]) marks.push("通讯作者");
+      return marks.length ? author + "（" + marks.join("，") + "）" : author;
+    });
+    return formatted.join("; ");
+  }
+
+  function readDataFile(relativePath) {
+    try {
+      if (typeof ArxivDailyDataDir !== "undefined") {
+        return ArxivDailyDataDir.readFile(relativePath) || "";
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  function paperKey(paper) {
+    return baseArxivId(paper && (paper.arxivId || paper.id || paper.paperId)) ||
+      String((paper && (paper.title || paper.link || paper.url)) || "");
+  }
+
+  function romanNumeral(num) {
+    var n = Math.max(1, Math.min(3999, parseInt(num, 10) || 1));
+    var map = [
+      [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"],
+      [100, "C"], [90, "XC"], [50, "L"], [40, "XL"],
+      [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
+    ];
+    var out = "";
+    for (var i = 0; i < map.length; i++) {
+      while (n >= map[i][0]) {
+        out += map[i][1];
+        n -= map[i][0];
+      }
+    }
+    return out;
+  }
+
+  function isCrossPaper(paper, crossCats) {
+    return !!(paper && (paper.selectionCross || paperMatchesCategories(paper, crossCats || [])));
+  }
+
+  function scoreOf(paper) {
+    return parseInt(paper && (paper.selectionScore || paper.llmScore || 0), 10) || 0;
+  }
+
+  function takePapers(pool, seen, limit) {
+    var selected = [];
+    seen = seen || {};
+    for (var i = 0; i < pool.length; i++) {
+      var key = paperKey(pool[i]);
+      if (key && seen[key]) continue;
+      selected.push(pool[i]);
+      if (key) seen[key] = true;
+      if (limit !== undefined && limit !== null && selected.length >= limit) break;
+    }
+    return selected;
+  }
+
+  function sectionTags(papers) {
+    var counts = {};
+    for (var i = 0; i < papers.length; i++) {
+      var tags = papers[i].llmTags || [];
+      for (var t = 0; t < tags.length; t++) {
+        var tag = String(tags[t] || "").trim();
+        if (!tag) continue;
+        counts[tag] = (counts[tag] || 0) + 1;
+      }
+    }
+    return Object.keys(counts).sort(function (a, b) {
+      return counts[b] - counts[a] || a.localeCompare(b);
+    }).slice(0, 6);
+  }
+
+  function paperSummaryText(paper) {
+    return [
+      paper && paper.llmReason ? "推荐理由: " + paper.llmReason : "",
+      paper && paper.abstract ? "摘要: " + String(paper.abstract).slice(0, 1200) : "",
+    ].filter(Boolean).join("\n");
+  }
+
+  function fallbackGuide(paper, cross) {
+    var title = paper && paper.title ? paper.title : "这篇论文";
+    var cats = paper && (paper.primaryCategory || paper.categories) ? "它位于 " + (paper.primaryCategory || paper.categories) + " 方向。" : "";
+    var reason = paper && paper.llmReason ? String(paper.llmReason) : "";
+    var abs = paper && paper.abstract ? String(paper.abstract) : "";
+    var absShort = abs ? abs.slice(0, cross ? 850 : 1100) + (abs.length > (cross ? 850 : 1100) ? "..." : "") : "";
+    var tags = paper && paper.llmTags && paper.llmTags.length ? paper.llmTags.join("、") : "";
+
+    if (cross) {
+      return [
+        title + " 可以先按一个跨领域问题来理解。" + (cats ? cats : "") +
+          " 对半外行读者来说，第一步不是追逐所有技术细节，而是抓住它所在领域关心的对象、自由度和可观测量。" +
+          (tags ? " 这篇文章中最值得先建立图像的关键词是 " + tags + "。" : ""),
+        (reason ? "它进入交叉推荐的原因是：" + reason + " " : "") +
+          (absShort ? "从摘要看，文章的叙事主线大致是：" + absShort : "当前缺少完整摘要，因此只能先依据题名、分类和筛选理由判断。") +
+          " 读这类文章时可以把重点放在“问题从哪里来、作者用什么证据约束它、结论改变了哪一种图像”这条链上。",
+        "如果要把它和你的核心方向连接起来，建议关注其中是否提供了新的材料平台、谱学或输运判据、有效模型、边界或缺陷态图像，以及这些结果是否能转译到拓扑超导、Majorana、涡旋束缚态或 STM/STS 可观测量上。"
+      ].join("\n\n");
+    }
+
+    return [
+      title + " 可以从一幅基础图像进入：先识别论文研究的材料或模型、关键自由度、实验或理论可观测量，再看作者试图解决的具体矛盾。" +
+        (tags ? " 本文可先围绕 " + tags + " 建立阅读坐标。" : ""),
+      (reason ? "它被选为核心候选的原因是：" + reason + " " : "") +
+        (absShort ? "摘要显示，文章的逻辑链是：" + absShort : "当前缺少完整摘要，因此需要结合正文或 arXiv 页面继续确认。") +
+        " 阅读时可以顺着“出发问题 -> 方法和可观测量 -> 主要现象 -> 机制解释 -> 对后续工作的价值”这条线来组织。",
+      "它的价值通常不只在于给出一个结论，还在于提供一种可复用的判断方式：哪些信号可信、哪些机制需要排除、哪些材料或参数区间值得继续追踪。"
+    ].join("\n\n");
+  }
+
+  function shortAbstract(paper, limit) {
+    var text = String((paper && paper.abstract) || "").replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    limit = limit || 520;
+    return text.slice(0, limit) + (text.length > limit ? "..." : "");
+  }
+
+  function cacheArxivMetadata(papers) {
+    if (!papers || !papers.length || typeof ArxivDailyDataDir === "undefined") return;
+    try {
+      var cache = ArxivDailyDataDir.readJSON("cache/arxiv/metadata.json") || {};
+      for (var i = 0; i < papers.length; i++) {
+        var id = baseArxivId(papers[i].arxivId);
+        if (!id) continue;
+        cache[id] = {
+          arxivId: id,
+          title: papers[i].title || "",
+          authors: papers[i].authors || "",
+          abstract: papers[i].abstract || "",
+          primaryCategory: papers[i].primaryCategory || "",
+          categories: papers[i].categories || "",
+          published: papers[i].published || "",
+          doi: papers[i].doi || "",
+          journalRef: papers[i].journalRef || "",
+          citationIdentifier: papers[i].citationIdentifier || papers[i].doi || ("arXiv:" + id),
+          cachedAt: new Date().toISOString(),
+        };
+      }
+      ArxivDailyDataDir.writeJSON("cache/arxiv/metadata.json", cache);
+    } catch (e) {
+      logError("cache arXiv metadata failed: " + (e.message || e));
+    }
+  }
+
+  function extractArxivIdsFromMarkdown(markdown) {
+    var seen = {};
+    var ids = [];
+    var re = /(?:arXiv:\s*|arxiv\.org\/(?:abs|pdf)\/)([0-9]{4}\.[0-9]{4,5}(?:v\d+)?|[a-z-]+\/[0-9]{7}(?:v\d+)?)/ig;
+    var match;
+    while ((match = re.exec(String(markdown || "")))) {
+      var id = baseArxivId(match[1]);
+      if (id && !seen[id]) {
+        seen[id] = true;
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  function buildPriorReportMap(currentDate) {
+    var map = {};
+    if (typeof ArxivDailyReportStore === "undefined") return map;
+    try {
+      var reports = ArxivDailyReportStore.listReports().slice().sort(function (a, b) {
+        return String(a.date || "").localeCompare(String(b.date || ""));
+      });
+      for (var i = 0; i < reports.length; i++) {
+        var date = reports[i].date || "";
+        if (!date || date === currentDate || date > currentDate) continue;
+        var md = ArxivDailyReportStore.loadReport(date) || "";
+        var ids = extractArxivIdsFromMarkdown(md);
+        for (var j = 0; j < ids.length; j++) {
+          if (!map[ids[j]]) map[ids[j]] = { date: date, fileName: reports[i].fileName || "" };
+        }
+      }
+    } catch (err) {
+      logError("build prior report map failed: " + (err.message || err));
+    }
+    return map;
+  }
+
+  function annotatePriorReports(papers, priorMap) {
+    for (var i = 0; i < (papers || []).length; i++) {
+      var id = baseArxivId(papers[i] && papers[i].arxivId);
+      if (id && priorMap[id]) {
+        papers[i].previousReportDate = priorMap[id].date;
+      }
+    }
+  }
+
+  function parseGuessResponse(text, ranked, limit) {
+    var parsed = parseLLMSelectionResponse(text);
+    var map = {};
+    for (var i = 0; i < ranked.length; i++) {
+      var key = paperKey(ranked[i]);
+      if (key) map[key] = ranked[i];
+    }
+    var selected = [];
+    for (var p = 0; p < parsed.length; p++) {
+      var id = baseArxivId(parsed[p].arxiv_id || parsed[p].arxivId || parsed[p].id);
+      var paper = map[id];
+      if (!paper) continue;
+      var score = clampScore(parsed[p].score, 0);
+      if (score < 3) continue;
+      paper.guessScore = score;
+      paper.guessReason = String(parsed[p].reason || parsed[p].relevance || "").trim();
+      selected.push(paper);
+      if (selected.length >= limit) break;
+    }
+    return selected;
+  }
+
+  // ── Module ────────────────────────────────────────────────────────────────
+
+  globalThis.ArxivDailyReportGenerator = {
+
+    // Check if user can generate a report
+    canGenerate: function () {
+      if (typeof ArxivDailyConfig === "undefined") return false;
+      if (typeof ArxivDailyLLM === "undefined") return false;
+      return ArxivDailyConfig.isReadyForReport();
+    },
+
+    // Main generation pipeline
+    generate: async function (dateStr, cancelToken, onProgress, options) {
+      options = options || {};
+      dateStr = dateStr || getDateStr();
+      log("=== Report generation started: " + dateStr + " ===");
+      emitProgress(onProgress, "开始生成日报: " + dateStr, 2);
+
+      var reportMeta = { date: dateStr, paperCount: 0 };
+      var config = {};
+
+      if (typeof ArxivDailyConfig !== "undefined") {
+        config = {
+          coreCategories: ArxivDailyConfig.get("arxiv.coreCategories") || [],
+          crossCategories: ArxivDailyConfig.get("arxiv.crossCategories") || [],
+          minScore: ArxivDailyConfig.get("screening.llmMinScore") || 3,
+          maxCandidates: ArxivDailyConfig.get("screening.maxCandidates") || 80,
+          keywordPrefilter: ArxivDailyConfig.get("screening.keywordPrefilter") !== false,
+          keywordMinScore: ArxivDailyConfig.get("screening.keywordMinScore") || 2,
+          prefilterMinScore: ArxivDailyConfig.get("screening.llmPrefilterMinScore") || 2,
+          prefilterPasses: Math.max(1, Math.min(5, parseInt(ArxivDailyConfig.get("screening.llmPrefilterPasses") || 3, 10) || 3)),
+          selectionMode: ArxivDailyConfig.get("screening.selectionMode") || "llm",
+          llmBatchSize: ArxivDailyConfig.get("screening.llmBatchSize") || 20,
+          llmPasses: Math.max(1, Math.min(5, parseInt(ArxivDailyConfig.get("screening.llmPasses") || 3, 10) || 3)),
+          topN: ArxivDailyConfig.get("deepRead.topN") || 5,
+          crossN: ArxivDailyConfig.get("deepRead.crossN") || 3,
+          deepReadEnabled: ArxivDailyConfig.get("deepRead.enabled") !== false,
+          deepReadMinCoreScore: ArxivDailyConfig.get("deepRead.minCoreScore") || 4,
+          deepReadMinCrossScore: ArxivDailyConfig.get("deepRead.minCrossScore") || 1,
+          outputTopN: ArxivDailyConfig.get("output.topN") || 3,
+          outputGuessYouLikeN: ArxivDailyConfig.get("output.guessYouLikeN") || 7,
+          outputMinCoreScore: ArxivDailyConfig.get("output.minCoreScore") || 2,
+          outputMinCrossScore: ArxivDailyConfig.get("output.minCrossScore") || 1,
+          outputCrossFallbackN: ArxivDailyConfig.get("output.crossFallbackN") || 4,
+        };
+      }
+      if (options.noLLM) config.selectionMode = "keyword";
+      config.llmOptions = (!options.noLLM && options.modelRef) ? { kind: "report", modelRef: options.modelRef } : { kind: "report" };
+      var llmConfiguredForReport = !options.noLLM &&
+        typeof ArxivDailyLLM !== "undefined" &&
+        ArxivDailyLLM.isConfigured(config.llmOptions);
+
+      if (config.coreCategories.length === 0) {
+        throw new Error("No arXiv categories configured. Configure core arXiv categories first.");
+      }
+
+      // ── Step 1: Fetch from announcement pages ──────────────────────────
+      if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
+      log("Step 1: Fetching core announcements...");
+      emitProgress(onProgress, "正在抓取核心 arXiv 分区: " + config.coreCategories.join(", "), 12);
+
+      var allPapers = [];
+
+      if (typeof ArxivDailyFetcher !== "undefined") {
+        try {
+          var corePapers = await ArxivDailyFetcher.fetchAnnouncements(
+            config.coreCategories, dateStr, cancelToken, onProgress
+          );
+          emitProgress(onProgress, "核心分区抓取完成: " + corePapers.length + " 篇", 18);
+
+          var crossPapers = [];
+          if (config.crossCategories.length > 0) {
+            log("Fetching cross-category announcements...");
+            emitProgress(onProgress, "正在抓取交叉 arXiv 分区: " + config.crossCategories.join(", "), 18);
+            crossPapers = await ArxivDailyFetcher.fetchAnnouncements(
+              config.crossCategories, dateStr, cancelToken, onProgress
+            );
+            emitProgress(onProgress, "交叉分区抓取完成: " + crossPapers.length + " 篇", 20);
+          }
+
+          allPapers = dedupePapers(corePapers.concat(crossPapers));
+          emitProgress(onProgress, "抓取去重完成: " + allPapers.length + " 篇候选论文", 23);
+        } catch (e) {
+          throw stageError("Fetching arXiv papers failed", e);
+        }
+
+        if (allPapers.length > 0) {
+          var ids = allPapers.map(function (p) { return p.arxivId; });
+          try {
+            emitProgress(onProgress, "正在补全 arXiv 元数据: " + ids.length + " 个 ID", 24);
+            var apiPapers = await ArxivDailyFetcher.fetchMetadata(ids, cancelToken, onProgress);
+            allPapers = ArxivDailyFetcher.merge(allPapers, apiPapers);
+            allPapers = dedupePapers(allPapers);
+            cacheArxivMetadata(allPapers);
+            emitProgress(onProgress, "元数据补全完成: " + apiPapers.length + " 条 API 结果，合并后 " + allPapers.length + " 篇", 28);
+          } catch (e) {
+            throw stageError("Fetching arXiv metadata failed", e);
+          }
+        }
+      }
+
+      log("Total papers fetched: " + allPapers.length);
+      reportMeta.fetchedCount = allPapers.length;
+      if (allPapers.length === 0) {
+        var dateFilter = typeof ArxivDailyConfig !== "undefined"
+          ? (ArxivDailyConfig.get("arxiv.dateFilter") || "latest")
+          : "latest";
+        var daysBack = typeof ArxivDailyConfig !== "undefined"
+          ? (ArxivDailyConfig.get("arxiv.daysBack") || 3)
+          : 3;
+        throw new Error(
+          "No papers found after arXiv fetching. " +
+          "coreCategories=" + config.coreCategories.join(",") +
+          "; crossCategories=" + config.crossCategories.join(",") +
+          "; dateFilter=" + dateFilter +
+          "; daysBack=" + daysBack + ". " +
+          "Check arXiv category codes, date filter, network access, cache, and whether the selected categories have new papers today."
+        );
+      }
+      if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
+
+      var paperDateStr = inferReportDateFromPapers(allPapers);
+      if (paperDateStr && paperDateStr !== dateStr) {
+        reportMeta.requestedDate = dateStr;
+        dateStr = paperDateStr;
+        reportMeta.date = dateStr;
+        emitProgress(onProgress, "日报日期按抓取论文发表日期校正为: " + dateStr, 29);
+      }
+
+      // ── Step 2: Keyword scoring / optional keyword-only pre-filter ─────
+      log("Step 2: Keyword scoring...");
+      emitProgress(onProgress, "正在为候选论文计算关键词特征: " + allPapers.length + " 篇", 32);
+      ensureKeywordScores(allPapers);
+      var llmSelectionMode = config.selectionMode !== "keyword";
+      var candidates = allPapers.slice();
+      if (!llmSelectionMode && config.keywordPrefilter && typeof ArxivDailyKeywords !== "undefined") {
+        candidates = ArxivDailyKeywords.prefilter(allPapers, config.keywordMinScore);
+      } else if (llmSelectionMode) {
+        reportMeta.keywordPrefilterBypassed = true;
+      }
+      if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
+
+      if (candidates.length === 0 && allPapers.length > 0) {
+        candidates = allPapers.slice();
+        candidates.sort(function (a, b) { return (b.keywordScore || 0) - (a.keywordScore || 0); });
+        reportMeta.keywordFallback = true;
+        emitProgress(onProgress, "关键词预筛没有命中，已回退到全部抓取论文继续筛选: " + candidates.length + " 篇", 34);
+      } else if (llmSelectionMode) {
+        emitProgress(onProgress, "LLM 模式已跳过关键词预筛；关键词仅作为评分特征，送入 LLM " + candidates.length + " 篇", 34);
+      } else {
+        emitProgress(onProgress, "关键词预筛完成: " + allPapers.length + " → " + candidates.length + " 篇", 34);
+      }
+
+      // Limit candidates only for keyword-only mode. LLM mode follows the
+      // desktop projects: keep high recall and let the LLM judge all fetched
+      // papers, with keyword score provided only as a feature and fallback.
+      if (!llmSelectionMode && candidates.length > config.maxCandidates) {
+        candidates.sort(function (a, b) { return (b.keywordScore || 0) - (a.keywordScore || 0); });
+        candidates = candidates.slice(0, config.maxCandidates);
+        emitProgress(onProgress, "候选数量超过上限，保留关键词分数靠前的 " + candidates.length + " 篇", 36);
+      }
+      log("Candidates for LLM: " + candidates.length);
+      reportMeta.candidateCount = candidates.length;
+
+      var interestProfile = "";
+      if (typeof ArxivDailyDataDir !== "undefined") {
+        interestProfile = ArxivDailyDataDir.readFile("research_interests.base.md") ||
+                         ArxivDailyDataDir.readFile("research_interests.active.md") || "";
+      }
+      var prefilterRejected = [];
+
+      // ── Step 3: Broad LLM prefilter ───────────────────────────────────
+      if (llmSelectionMode && candidates.length > 0 &&
+          llmConfiguredForReport &&
+          typeof ArxivDailyPrompts !== "undefined" && ArxivDailyPrompts.prefilterPrompt) {
+        log("Step 3: broad LLM prefilter...");
+        reportMeta.prefilterSourceCount = candidates.length;
+        emitProgress(onProgress, "正在进行宽松 LLM 预筛: " + candidates.length + " 篇，" +
+          config.prefilterPasses + " 轮并行取平均，最低保留分 " + config.prefilterMinScore, 38);
+
+        var prefilterPrompt = ArxivDailyPrompts.prefilterPrompt(interestProfile);
+        var prefilterBatchResults;
+        try {
+          prefilterBatchResults = await ArxivDailyLLM.batchScreen(candidates, prefilterPrompt, config.llmBatchSize, cancelToken, Object.assign({
+            passes: config.prefilterPasses,
+            parallelPasses: true,
+            taskLabel: "prefilter",
+          }, config.llmOptions));
+        } catch (e) {
+          throw stageError("LLM broad prefilter failed", e);
+        }
+
+        var parsedPrefilter = parseBatchSelections(prefilterBatchResults, candidates, {
+          label: "LLM 预筛",
+          minKeepScore: config.prefilterMinScore,
+          fallbackKeepAll: true,
+          fallbackReason: "LLM 预筛结果不可解析，为避免关键词误杀，已宽松保留并进入正式评分。",
+          missingReason: "LLM 预筛未返回这篇论文，为避免误杀，已宽松保留并进入正式评分。",
+          onProgress: onProgress,
+          progressStart: 40,
+          progressStep: 3,
+          progressMax: 14,
+        });
+        reportMeta.prefilterParseFailures = parsedPrefilter.parseFailures;
+
+        var prefilterSource = candidates.slice();
+        var prefiltered = markPrefilterResults(
+          aggregateScreened(parsedPrefilter.records, config.prefilterMinScore),
+          config.prefilterMinScore
+        ).filter(function (paper) {
+          var avg = parseFloat(paper.prefilterAverageScore || paper.prefilterScore || 0) || 0;
+          return paper.prefilterKeep || avg >= config.prefilterMinScore;
+        });
+
+        if (prefiltered.length === 0) {
+          reportMeta.prefilterFallback = true;
+          prefiltered = candidates.map(function (paper) {
+            var clone = Object.assign({}, paper);
+            clone.prefilterScore = fallbackScore(clone);
+            clone.prefilterAverageScore = clone.prefilterScore;
+            clone.prefilterPassCount = 0;
+            clone.prefilterKeep = true;
+            clone.prefilterReason = "LLM 预筛没有保留任何论文，已回退到全部候选进入正式评分。";
+            return clone;
+          });
+          prefilterRejected = [];
+          emitProgress(onProgress, "宽松 LLM 预筛没有保留论文，已回退到全部候选: " + prefiltered.length + " 篇", 54);
+        } else {
+          var prefilteredMap = {};
+          for (var pk = 0; pk < prefiltered.length; pk++) {
+            var keptKey = paperKey(prefiltered[pk]);
+            if (keptKey) prefilteredMap[keptKey] = true;
+          }
+          prefilterRejected = prefilterSource.filter(function (paper) {
+            var key = paperKey(paper);
+            return key && !prefilteredMap[key];
+          }).map(function (paper) {
+            var clone = Object.assign({}, paper);
+            clone.prefilterKeep = false;
+            clone.prefilterReason = "宽松 LLM 预筛未通过。";
+            return clone;
+          });
+          emitProgress(onProgress, "宽松 LLM 预筛完成: " + candidates.length + " → " + prefiltered.length +
+            " 篇，未通过 " + prefilterRejected.length + " 篇将写入其他论文", 54);
+        }
+
+        candidates = prefiltered;
+        reportMeta.prefilterPassedCount = candidates.length;
+        reportMeta.prefilterPasses = config.prefilterPasses;
+        reportMeta.prefilterMinScore = config.prefilterMinScore;
+        reportMeta.candidateCount = candidates.length;
+      }
+
+      // ── Step 4: LLM screening ─────────────────────────────────────────
+      var screened = [];
+      if (config.selectionMode !== "keyword" && candidates.length > 0 &&
+          llmConfiguredForReport) {
+        log("Step 4: LLM screening...");
+        emitProgress(onProgress, "正在进行 LLM 相关性筛选: " + candidates.length + " 篇，批大小 " + config.llmBatchSize +
+          "，筛选轮数 " + config.llmPasses + "（同批并行）", 58);
+
+        var prompt = ArxivDailyPrompts.screeningPrompt(interestProfile);
+        var batchResults;
+        try {
+          batchResults = await ArxivDailyLLM.batchScreen(candidates, prompt, config.llmBatchSize, cancelToken, Object.assign({
+            passes: config.llmPasses,
+            parallelPasses: true,
+            taskLabel: "screening",
+          }, config.llmOptions));
+        } catch (e) {
+          throw stageError("LLM relevance screening failed", e);
+        }
+
+        var parsedScreening = parseBatchSelections(batchResults, candidates, {
+          label: "LLM 筛选",
+          minKeepScore: config.minScore,
+          fallbackReason: "LLM 筛选结果不可解析，已按关键词分数兜底。",
+          missingReason: "LLM 未返回这篇论文的筛选项，已按关键词分数兜底。",
+          onProgress: onProgress,
+          progressStart: 60,
+          progressStep: 3,
+          progressMax: 14,
+        });
+        screened = parsedScreening.records;
+        reportMeta.llmParseFailures = parsedScreening.parseFailures;
+      } else {
+        log("LLM screening skipped");
+        for (var sk = 0; sk < candidates.length; sk++) {
+          screened.push(applySelection(Object.assign({}, candidates[sk]), {
+            score: fallbackScore(candidates[sk]),
+            keep: fallbackScore(candidates[sk]) >= config.minScore,
+            reason: config.selectionMode === "keyword"
+              ? "关键词筛选模式：按关键词分数进入日报。"
+              : "LLM 未配置或无候选，按关键词分数兜底。",
+            tags: [],
+          }));
+        }
+        emitProgress(onProgress, "LLM 筛选跳过，使用关键词分数: " + screened.length + " 篇", 58);
+      }
+
+      screened = aggregateScreened(screened, config.minScore);
+      screened.sort(scoreSort);
+      log("LLM screened: " + screened.length);
+      reportMeta.screenedCount = screened.length;
+      emitProgress(onProgress, "相关性筛选完成: " + screened.length + " 篇有评分", 72);
+
+      // ── Step 4: Filter by score ───────────────────────────────────────
+      var topPapers = screened.filter(function (p) {
+        var score = p.selectionScore || p.llmScore || fallbackScore(p);
+        return p.selectionKeep || score >= config.minScore;
+      });
+      topPapers.sort(scoreSort);
+
+      if (topPapers.length === 0 && screened.length > 0) {
+        var fallbackLimit = Math.max(1, (config.topN || 5) + (config.crossN || 3));
+        topPapers = screened.slice(0, fallbackLimit);
+        reportMeta.selectionFallback = true;
+        reportMeta.selectionWarning = "没有论文达到当前 LLM 最低分阈值，报告改为保留低置信但排序靠前的邻近候选，避免抓取成功后生成空报告。";
+        for (var fb = 0; fb < topPapers.length; fb++) {
+          if (!topPapers[fb].llmReason) {
+            topPapers[fb].llmReason = "低置信兜底候选：未达到当前最低分阈值，但在今日候选中排序靠前。";
+          }
+        }
+        emitProgress(onProgress, "没有论文达到最低分阈值，已使用邻近候选兜底: " + topPapers.length + " 篇", 78);
+      }
+
+      log("Top papers after screening: " + topPapers.length);
+      reportMeta.selectedCount = topPapers.length;
+      emitProgress(onProgress, "日报候选确定: " + topPapers.length + " 篇", 82);
+
+      if (config.deepReadEnabled && llmConfiguredForReport) {
+        try {
+          await this._enrichGuides(screened, config, cancelToken, onProgress);
+        } catch (guideErr) {
+          reportMeta.deepReadWarning = "深度导读生成失败，报告已回退为摘要导读: " + (guideErr.message || guideErr);
+          emitProgress(onProgress, reportMeta.deepReadWarning, 84);
+        }
+      }
+
+      var guessPapers = [];
+      if (llmConfiguredForReport) {
+        try {
+          guessPapers = await this._buildGuessYouLike(topPapers, config, cancelToken, onProgress);
+        } catch (guessErr) {
+          reportMeta.guessYouLikeWarning = "猜你喜欢区块生成失败，已跳过: " + (guessErr.message || guessErr);
+          emitProgress(onProgress, reportMeta.guessYouLikeWarning, 86);
+        }
+      }
+
+      // ── Step 5: Generate markdown report ──────────────────────────────
+      if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
+      log("Step 5: Generating markdown report...");
+      emitProgress(onProgress, "正在生成 Markdown 报告: " + topPapers.length + " 篇", 88);
+
+      var priorReportMap = buildPriorReportMap(dateStr);
+      annotatePriorReports(screened, priorReportMap);
+      annotatePriorReports(guessPapers, priorReportMap);
+      annotatePriorReports(prefilterRejected, priorReportMap);
+
+      var md = this._buildMarkdown(dateStr, topPapers, config, reportMeta, {
+        guessPapers: guessPapers,
+        weakRelatedSource: screened,
+        otherPapers: prefilterRejected,
+      });
+      reportMeta.paperCount = topPapers.length;
+
+      // ── Step 6: Save ─────────────────────────────────────────────────
+      var saved = false;
+      if (typeof ArxivDailyReportStore === "undefined") {
+        throw new Error("Report save failed: report store module is not loaded");
+      }
+      try {
+        if (ArxivDailyReportStore.hasReport && ArxivDailyReportStore.hasReport(dateStr)) {
+          emitProgress(onProgress, "检测到当天已有旧报告，正在按删除旧报告流程清理关联项目论文", 92);
+          if (typeof ArxivDailyCenterWorkspace !== "undefined" &&
+              ArxivDailyCenterWorkspace.deleteReportCascade) {
+            await ArxivDailyCenterWorkspace.deleteReportCascade(dateStr, { deleteZoteroItems: true });
+          } else {
+            ArxivDailyReportStore.deleteReport(dateStr);
+          }
+        }
+        saved = ArxivDailyReportStore.saveReport(dateStr, md, reportMeta);
+      } catch (e) {
+        throw stageError("Report save failed", e);
+      }
+      if (!saved) {
+        var storeDetail = "";
+        try {
+          if (typeof ArxivDailyDataDir !== "undefined" && ArxivDailyDataDir.getLastError) {
+            storeDetail = ArxivDailyDataDir.getLastError() || "";
+          }
+        } catch (e2) {}
+        throw new Error("Report save failed: report store returned false" +
+          (storeDetail ? "; " + storeDetail : ""));
+      }
+
+      emitProgress(onProgress, "报告已保存: " + dateStr + "，论文 " + topPapers.length + " 篇", 96);
+      emitProgress(onProgress, "正在刷新 Zotero 内部视图", 98);
+      log("=== Report generation complete: " + dateStr + " ===");
+      return { markdown: md, meta: reportMeta, saved: saved };
+    },
+
+    // ── Markdown builder ──────────────────────────────────────────────
+
+    _enrichGuides: async function (papers, config, cancelToken, onProgress) {
+      if (!papers || !papers.length) return;
+      var coreDone = 0;
+      var crossDone = 0;
+      for (var i = 0; i < papers.length; i++) {
+        if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
+        var paper = papers[i];
+        var score = scoreOf(paper);
+        var cross = isCrossPaper(paper, config.crossCategories || []);
+        if (!cross && (coreDone >= (config.topN || 5) || score < (config.deepReadMinCoreScore || 4))) continue;
+        if (cross && (crossDone >= (config.crossN || 3) || score < (config.deepReadMinCrossScore || 1))) continue;
+        emitProgress(onProgress, "正在生成论文导读: " + (paper.title || paper.arxivId || ""), 83 + Math.min(4, coreDone + crossDone));
+        try {
+          var prompt = cross
+            ? ArxivDailyPrompts.crossReadPrompt(paper)
+            : ArxivDailyPrompts.deepReadPrompt(paper, paper.abstract || "");
+          var response = await ArxivDailyLLM.complete(
+            cross ? "你是凝聚态交叉方向论文推荐助手。请用简体中文回答。" : "你是严谨的凝聚态论文导读助手。请用简体中文回答。",
+            prompt,
+            cancelToken,
+            config.llmOptions
+          );
+          if (cross) {
+            paper.crossFieldGuide = String(response || "").trim();
+            crossDone++;
+          } else {
+            paper.readingGuide = String(response || "").trim();
+            coreDone++;
+          }
+        } catch (e) {
+          if (cancelToken && cancelToken.cancelled) throw e;
+          if (cross) {
+            paper.crossFieldGuide = fallbackGuide(paper, true);
+            crossDone++;
+          } else {
+            paper.readingGuide = fallbackGuide(paper, false);
+            coreDone++;
+          }
+        }
+      }
+    },
+
+    _buildGuessYouLike: async function (rankedPapers, config, cancelToken, onProgress) {
+      var limit = Math.max(0, Math.min(20, parseInt(config.outputGuessYouLikeN, 10) || 0));
+      if (!limit || !rankedPapers || !rankedPapers.length) return [];
+      var feedbackProfile = readDataFile("research_interests.feedback.md") ||
+        readDataFile("feedback/research_interests.feedback.md");
+      if (!String(feedbackProfile || "").trim()) return [];
+      if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured(config.llmOptions)) return [];
+
+      emitProgress(onProgress, "正在根据猜你喜欢画像重排今日候选", 85);
+      var candidates = rankedPapers.slice(0, 80);
+      var papersText = candidates.map(function (paper) {
+        return [
+          "arxiv_id: " + (paper.arxivId || ""),
+          "title: " + (paper.title || ""),
+          "categories: " + (paper.categories || paper.primaryCategory || ""),
+          "summary: " + paperSummaryText(paper),
+          "current_report_score: " + scoreOf(paper),
+          "current_relevance: " + (paper.llmReason || ""),
+        ].join("\n");
+      }).join("\n\n---\n\n");
+      var prompt = [
+        "Rank papers for a '猜你喜欢' section.",
+        "",
+        "Feedback-adjusted profile:",
+        feedbackProfile,
+        "",
+        "Today's candidate papers:",
+        papersText,
+        "",
+        "Return a JSON array with at most " + limit + " objects:",
+        '[{"arxiv_id":"paper id","score":1,"reason":"简短中文理由"}]',
+        "",
+        "Use score 1-5. Only include papers with score >= 3.",
+      ].join("\n");
+      var response = await ArxivDailyLLM.complete(
+        "You are ranking today's arXiv papers for a short '猜你喜欢' section. Use the feedback-adjusted profile. Return only valid JSON.",
+        prompt,
+        cancelToken,
+        config.llmOptions
+      );
+      return parseGuessResponse(response, candidates, limit);
+    },
+
+    _buildMarkdown: function (dateStr, papers, config, meta, extras) {
+      var lines = [];
+      var dateLabel = formatDate(dateStr);
+      extras = extras || {};
+
+      lines.push("# " + dateLabel + " arXiv 兴趣报告");
+      lines.push("");
+      lines.push("> 自动生成");
+      lines.push("");
+      lines.push("## 今日概览");
+      lines.push("");
+      lines.push("- 推荐论文数: " + papers.length);
+      if (meta) {
+        lines.push("- 抓取论文数: " + (meta.fetchedCount || 0));
+        lines.push("- LLM / 关键词筛选候选数: " + (meta.candidateCount || 0));
+        if (meta.prefilterSourceCount) {
+          lines.push("- 宽松 LLM 预筛: " + meta.prefilterSourceCount + " → " + (meta.prefilterPassedCount || 0) +
+            " 篇，" + (meta.prefilterPasses || 1) + " 轮并行取平均，最低保留分 " + (meta.prefilterMinScore || 2));
+        }
+        lines.push("- 相关性评分论文数: " + (meta.screenedCount || 0));
+        if (meta.keywordPrefilterBypassed) lines.push("- 关键词处理: LLM 模式使用宽松 LLM 预筛替代关键词预筛；关键词仅作为排序与兜底特征");
+        if (meta.prefilterFallback) lines.push("- 预筛提示: LLM 预筛没有保留论文，已回退到全部候选进入正式评分");
+        if (meta.selectionWarning) lines.push("- 筛选提示: " + meta.selectionWarning);
+        if (meta.deepReadWarning) lines.push("- 导读提示: " + meta.deepReadWarning);
+        if (meta.guessYouLikeWarning) lines.push("- 猜你喜欢提示: " + meta.guessYouLikeWarning);
+      }
+      lines.push("");
+
+      var coreCats = config.coreCategories || [];
+      var crossCats = config.crossCategories || [];
+      var ranked = papers.slice().sort(scoreSort);
+      var weakSourceRanked = (extras.weakRelatedSource || papers).slice().sort(scoreSort);
+      var otherPapers = (extras.otherPapers || []).slice().sort(function (a, b) {
+        return ((b.keywordScore || 0) - (a.keywordScore || 0)) ||
+          String(a.title || "").localeCompare(String(b.title || ""));
+      });
+      var sectionSeq = 0;
+      function addNumberedSection(title) {
+        sectionSeq++;
+        var label = romanNumeral(sectionSeq);
+        lines.push("## " + label + ". " + title);
+        lines.push("");
+        return label;
+      }
+      var themes = sectionTags(ranked);
+      if (themes.length) {
+        lines.push("## 今日主题");
+        lines.push("");
+        lines.push(themes.join(" / "));
+        lines.push("");
+      }
+
+      var guessPapers = extras.guessPapers || [];
+      if (guessPapers.length > 0) {
+        var guessLabel = addNumberedSection("猜你喜欢");
+        lines.push("这个区块根据“猜你喜欢科研兴趣画像”重排今日候选；它不影响后续推荐区块，同一篇论文仍可能在下面再次出现。");
+        lines.push("");
+        for (var gp = 0; gp < guessPapers.length; gp++) {
+          this._addPaper(lines, guessPapers[gp], gp + 1, { guess: true, headingLabel: guessLabel + "." + (gp + 1) + "." });
+        }
+      }
+
+      var seen = {};
+      var minCoreScore = parseInt(config.outputMinCoreScore, 10) || 2;
+      var minCrossScore = parseInt(config.outputMinCrossScore, 10) || 1;
+      var topN = parseInt(config.outputTopN, 10) || 3;
+      var relatedN = 10;
+      var crossFallbackN = parseInt(config.outputCrossFallbackN, 10) || 4;
+
+      var corePool = ranked.filter(function (p) {
+        return !isCrossPaper(p, crossCats) && scoreOf(p) >= minCoreScore &&
+          (paperMatchesCategories(p, coreCats) || !paperMatchesCategories(p, crossCats));
+      });
+      if (!corePool.length) {
+        corePool = ranked.filter(function (p) { return !isCrossPaper(p, crossCats); });
+      }
+      var topPapers = takePapers(corePool, seen, topN);
+      var detailPapers = takePapers(corePool, seen);
+
+      var relatedPreview = [];
+
+      var crossPapers = ranked.filter(function (p) {
+        return isCrossPaper(p, crossCats) && scoreOf(p) >= minCrossScore;
+      });
+      var crossFallback = [];
+      if (!crossPapers.length) {
+        crossFallback = takePapers(ranked.filter(function (p) {
+          return isCrossPaper(p, crossCats) || scoreOf(p) >= 1;
+        }), seen, crossFallbackN);
+      }
+
+      var recommended = {};
+      topPapers.concat(detailPapers).concat(crossPapers).concat(crossFallback).forEach(function (p) {
+        var key = paperKey(p);
+        if (key) recommended[key] = true;
+      });
+      relatedPreview = takePapers(ranked.filter(function (p) {
+        var key = paperKey(p);
+        return key && !recommended[key] && !isCrossPaper(p, crossCats) && scoreOf(p) >= 1;
+      }), {}, relatedN);
+
+      relatedPreview.forEach(function (p) {
+        var key = paperKey(p);
+        if (key) recommended[key] = true;
+      });
+      guessPapers.forEach(function (p) {
+        var key = paperKey(p);
+        if (key) recommended[key] = true;
+      });
+
+      var llmPassedNotRecommended = weakSourceRanked.filter(function (p) {
+        var key = paperKey(p);
+        return key && !recommended[key];
+      });
+
+      var topLabel = addNumberedSection("最相关论文");
+      if (topPapers.length) {
+        for (var i = 0; i < topPapers.length; i++) this._addPaper(lines, topPapers[i], i + 1, { guide: true, headingLabel: topLabel + "." + (i + 1) + "." });
+      } else {
+        lines.push("暂无达到核心分数阈值的论文。");
+        lines.push("");
+      }
+
+      var detailLabel = addNumberedSection("论文详细列表");
+      if (detailPapers.length) {
+        for (var d = 0; d < detailPapers.length; d++) this._addPaper(lines, detailPapers[d], d + 1, { headingLabel: detailLabel + "." + (d + 1) + "." });
+      } else {
+        lines.push("除最相关论文外，今日暂无更多达到核心阈值的相关文章。");
+        lines.push("");
+      }
+
+      var relatedLabel = addNumberedSection("其他相关文章速览");
+      if (relatedPreview.length) {
+        lines.push("以下论文相关性较弱或证据不如 Top 论文充分，但仍可能值得快速扫读标题、摘要和方法。");
+        lines.push("");
+        for (var rp = 0; rp < relatedPreview.length; rp++) this._addPaper(lines, relatedPreview[rp], rp + 1, { brief: true, headingLabel: relatedLabel + "." + (rp + 1) + "." });
+      } else {
+        lines.push("暂无更多可粗略推荐的相关文章。");
+        lines.push("");
+      }
+
+      var crossLabel = addNumberedSection("交叉方向推荐");
+      lines.push("这些论文不一定直接命中核心兴趣，但可能带来相邻方法、材料平台或新视角。");
+      lines.push("");
+      if (crossPapers.length > 0) {
+        for (var c = 0; c < crossPapers.length; c++) this._addPaper(lines, crossPapers[c], c + 1, { crossGuide: true, headingLabel: crossLabel + "." + (c + 1) + "." });
+      } else if (crossFallback.length) {
+        lines.push("今天没有筛选出足够明确的交叉领域论文。下面列出几篇方向上可能接近、值得快速扫读的新推荐。");
+        lines.push("");
+        for (var cf = 0; cf < crossFallback.length; cf++) this._addPaper(lines, crossFallback[cf], cf + 1, { brief: true, headingLabel: crossLabel + "." + (cf + 1) + "." });
+      } else {
+        lines.push("暂无明确交叉方向推荐。");
+        lines.push("");
+      }
+
+      var weakLabel = addNumberedSection("弱相关论文速读");
+      if (llmPassedNotRecommended.length) {
+        lines.push("下面列出通过宽松 LLM 预筛、但没有进入猜你喜欢/最相关/详细/速览/交叉推荐的论文，并按正式评分排序。这里保留题名、评分、推荐理由和摘要，方便快速扫读当天低置信但可能有用的论文。");
+        lines.push("");
+        for (var lp = 0; lp < llmPassedNotRecommended.length; lp++) {
+          this._addPaper(lines, llmPassedNotRecommended[lp], lp + 1, { brief: true, skim: true, headingLabel: weakLabel + "." + (lp + 1) + "." });
+        }
+      } else {
+        lines.push("无。");
+        lines.push("");
+      }
+
+      var otherLabel = addNumberedSection("其他论文");
+      if (otherPapers.length) {
+        lines.push("以下论文未通过宽松 LLM 预筛，仍保留标题、作者、链接和摘要，供需要时完整回看当天抓取池。");
+        lines.push("");
+        for (var op = 0; op < otherPapers.length; op++) {
+          this._addPaper(lines, otherPapers[op], op + 1, {
+            brief: true,
+            other: true,
+            headingLabel: otherLabel + "." + (op + 1) + ".",
+          });
+        }
+      } else {
+        lines.push("无。");
+        lines.push("");
+      }
+
+      return lines.join("\n");
+    },
+
+    _addPaper: function (lines, paper, num, options) {
+      options = options || {};
+      var score = paper.selectionScore || paper.llmScore || 0;
+      var scoreStr = score && !options.other ? " [评分: " + score + "/5]" : "";
+      var headingLabel = options.headingLabel || (num + ".");
+      lines.push("### " + headingLabel + " " + paper.title + scoreStr);
+      lines.push("");
+      var authors = formatAuthors(paper);
+      if (authors) lines.push("**作者**: " + authors);
+      lines.push("**arXiv**: [" + paper.arxivId + "](https://arxiv.org/abs/" + paper.arxivId + ")");
+      if (!options.other) {
+        lines.push("**标识符**: " + (paper.citationIdentifier || paper.doi || ("arXiv:" + paper.arxivId)));
+        if (paper.doi) lines.push("**DOI**: " + paper.doi);
+        if (paper.journalRef) lines.push("**Journal ref**: " + paper.journalRef);
+        if (paper.primaryCategory) lines.push("**分类**: " + paper.primaryCategory);
+      }
+      if (paper.previousReportDate) {
+        lines.push("**曾见日报**: [" + paper.previousReportDate + "](arxiv-daily-report://" + paper.previousReportDate + "/" + paper.arxivId + ")");
+      }
+      if (!options.other && Number.isFinite(parseFloat(paper.keywordScore))) lines.push("**关键词分数**: " + paper.keywordScore);
+      if (!options.other && options.guess && paper.guessReason) lines.push("**猜你喜欢理由**: " + paper.guessReason);
+      if (!options.other && paper.llmReason) lines.push("**推荐理由**: " + paper.llmReason);
+      if (!options.other && paper.llmTags && paper.llmTags.length > 0) {
+        lines.push("**标签**: " + paper.llmTags.join(", "));
+      }
+      if (paper.abstract) {
+        lines.push("");
+        lines.push("**摘要**:");
+        lines.push("");
+        if (options.other) {
+          lines.push(shortAbstract(paper, 1200));
+        } else if (options.brief) {
+          lines.push(shortAbstract(paper, options.skim ? 620 : 360));
+        } else {
+          lines.push(shortAbstract(paper, 900));
+        }
+      }
+      if (options.guide) {
+        lines.push("");
+        lines.push("**长导读**:");
+        lines.push("");
+        lines.push(paper.readingGuide || fallbackGuide(paper, false));
+      } else if (options.crossGuide) {
+        lines.push("");
+        lines.push("**交叉导读**:");
+        lines.push("");
+        lines.push(paper.crossFieldGuide || paper.readingGuide || fallbackGuide(paper, true));
+      }
+      lines.push("");
+      lines.push("---");
+      lines.push("");
+    },
+  };
+})();

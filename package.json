@@ -1,0 +1,14 @@
+{
+  "name": "zotero-arxiv-interest-daily-zotero9",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Cross-platform Zotero 9 XPI for personalized arXiv daily reports and LLM-assisted reading.",
+  "scripts": {
+    "build": "node scripts/build-xpi.js",
+    "check": "node scripts/check-js.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

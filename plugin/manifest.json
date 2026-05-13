@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "arXiv Interest Daily",
+  "version": "1.1.0",
+  "description": "Cross-platform Zotero 9 plugin for personalized arXiv screening, reports, and LLM-assisted reading",
+  "author": "arXiv Interest Daily Team",
+  "homepage_url": "https://github.com/zhzhu-wl/arxiv-interest-daily.git",
+  "applications": {
+    "zotero": {
+      "id": "arxiv-interest-daily@zotero",
+      "strict_min_version": "9.0",
+      "strict_max_version": "9.0.*",
+      "update_url": "https://raw.githubusercontent.com/zhzhu-wl/arxiv-interest-daily/main/updates.json"
+    }
+  }
+}
