@@ -1013,12 +1013,15 @@
     _readerZoom: 1,
     _highlightIndex: null,
     _feedbackIndex: null,
+    _reportSectionCollapseState: {},
     _nativeRestoreHandler: null,
+    _suppressNativeRestoreUntil: 0,
     _docSelectionAskHandler: null,
     _projectObserverID: null,
     _projectSyncTimer: null,
     _suppressProjectObserver: false,
     _projectItemCreation: {},
+    _projectItemCancelled: {},
     _readerOutlineWidth: 210,
     _outlineTargets: [],
     _outlineScrollHandler: null,
@@ -1366,11 +1369,75 @@
       }
     },
 
+    _reportSectionCollapseKey: function (meta, sectionTitle, sectionIndex) {
+      var date = meta && meta.date ? meta.date : (this._currentReportDate || this._currentTitle || "");
+      return [date, sectionIndex, sectionTitle || ""].join("|");
+    },
+
+    _getReportSectionCollapsed: function (key, defaultValue) {
+      if (!key || !this._reportSectionCollapseState) return !!defaultValue;
+      if (Object.prototype.hasOwnProperty.call(this._reportSectionCollapseState, key)) {
+        return !!this._reportSectionCollapseState[key];
+      }
+      return !!defaultValue;
+    },
+
+    _setReportSectionCollapsed: function (key, collapsed) {
+      if (!key) return;
+      if (!this._reportSectionCollapseState) this._reportSectionCollapseState = {};
+      this._reportSectionCollapseState[key] = !!collapsed;
+    },
+
+    suppressNativeRestore: function (durationMs) {
+      var until = Date.now() + Math.max(0, parseInt(durationMs, 10) || 900);
+      if (until > (this._suppressNativeRestoreUntil || 0)) {
+        this._suppressNativeRestoreUntil = until;
+      }
+    },
+
     _installNativeRestoreHooks: function () {
       var doc = this._doc;
       if (!doc || this._nativeRestoreHandler) return;
+      function pluginOwnedTarget(event) {
+        try {
+          var nodes = [];
+          if (event && typeof event.composedPath === "function") {
+            try { nodes = event.composedPath() || []; } catch (pathErr) { nodes = []; }
+          }
+          if (!nodes.length && event && event.target) {
+            var node = event.target;
+            for (var depth = 0; node && depth < 14; depth++) {
+              nodes.push(node);
+              node = node.parentNode || node.parentElement;
+            }
+          }
+          for (var i = 0; i < nodes.length; i++) {
+            var item = nodes[i];
+            if (!item || item.nodeType !== 1) continue;
+            if (item.closest && item.closest(
+              "#arxiv-daily-center-viewer,#arxiv-daily-center-dock,#arxiv-daily-left-panels," +
+              "#arxiv-daily-qa-sidebar,#arxiv-daily-qa-tab-btn,.ari-qa-selection-popup," +
+              "[id^='arxiv-daily-'],[id^='ari-btn-'],[id^='menu-ari-'],.arxiv-daily-btn"
+            )) {
+              return true;
+            }
+            var id = String(item.id || "");
+            var cls = "";
+            try {
+              cls = typeof item.className === "string"
+                ? item.className
+                : item.className && item.className.baseVal || "";
+            } catch (classErr) {}
+            if (/^(arxiv-daily|ari-btn|menu-ari)-/i.test(id) || /\barxiv-daily-/.test(String(cls || ""))) {
+              return true;
+            }
+          }
+        } catch (e) {}
+        return false;
+      }
       function nativeLibraryTarget(event) {
         try {
+          if (pluginOwnedTarget(event)) return false;
           var nodes = [];
           if (event && typeof event.composedPath === "function") {
             try { nodes = event.composedPath() || []; } catch (pathErr) { nodes = []; }
@@ -1411,6 +1478,14 @@
         try {
           if (!ArxivDailyCenterWorkspace._viewer ||
               ArxivDailyCenterWorkspace._viewer.style.display === "none") return;
+          if ((ArxivDailyCenterWorkspace._suppressNativeRestoreUntil || 0) > Date.now()) return;
+          if (pluginOwnedTarget(event)) {
+            if (event && event.type === "mousedown" &&
+                typeof ArxivDailyCenterWorkspace.suppressNativeRestore === "function") {
+              ArxivDailyCenterWorkspace.suppressNativeRestore(1400);
+            }
+            return;
+          }
           var target = event.target;
           if (!target || !target.closest) return;
           if (target.closest("#arxiv-daily-center-viewer") ||
@@ -1657,11 +1732,23 @@
       } catch (e) {}
       try {
         if (this._currentMarkdown && this._viewer && this._viewer.style.display !== "none") {
-          this._renderMarkdownReport(this._currentMarkdown, this._currentMeta || {});
+          this._rerenderCurrentMarkdownPreservingScroll();
         }
       } catch (renderErr) {
         logError("refresh project state views failed: " + (renderErr.message || renderErr));
       }
+    },
+
+    _rerenderCurrentMarkdownPreservingScroll: function () {
+      if (!this._viewerBody || !this._currentMarkdown) {
+        this._renderMarkdownReport(this._currentMarkdown, this._currentMeta || {});
+        return;
+      }
+      var scrollTop = this._viewerBody.scrollTop || 0;
+      var scrollLeft = this._viewerBody.scrollLeft || 0;
+      this._renderMarkdownReport(this._currentMarkdown, this._currentMeta || {});
+      this._viewerBody.scrollTop = Math.min(scrollTop, Math.max(0, this._viewerBody.scrollHeight - this._viewerBody.clientHeight));
+      this._viewerBody.scrollLeft = scrollLeft;
     },
 
     openReportInNewWindow: function (dateStr) {
@@ -2594,6 +2681,8 @@
         }
         var sectionTitle = stripSectionPrefix(section.title);
         var collapseWholeSection = shouldCollapseReportSection(sectionTitle);
+        var sectionCollapseKey = collapseWholeSection ? this._reportSectionCollapseKey(meta || {}, sectionTitle, i) : "";
+        var initiallyCollapsed = collapseWholeSection ? this._getReportSectionCollapsed(sectionCollapseKey, true) : false;
         var sectionId = "ari-report-section-" + i;
         var h2 = doc.createElement("h2");
         h2.id = sectionId;
@@ -2602,7 +2691,8 @@
           "font-size:16px;margin:18px 0 8px;padding-bottom:4px;border-bottom:1px solid ThreeDShadow;" +
           (collapseWholeSection
             ? "display:flex;align-items:center;gap:8px;padding:7px 8px;border:1px solid ThreeDShadow;" +
-              "border-left:3px solid #6b7f93;border-radius:4px;background:rgba(76,111,143,.07);"
+              "border-left:3px solid #6b7f93;border-radius:4px;background:Canvas;" +
+              "position:sticky;top:0;z-index:5;box-shadow:0 1px 0 rgba(128,128,128,.22);"
             : "");
         if (collapseWholeSection) {
           var h2Text = doc.createElement("span");
@@ -2644,7 +2734,7 @@
 
           var stickyRow = doc.createElement("div");
           stickyRow.style.cssText =
-            "position:sticky;top:0;z-index:3;display:flex;justify-content:flex-end;" +
+            "position:sticky;top:34px;z-index:4;display:flex;justify-content:flex-end;" +
             "padding:5px 0;margin:0 0 6px;background:Canvas;border-bottom:1px solid rgba(128,128,128,.22);";
           var stickyCollapse = doc.createElement("button");
           stickyCollapse.type = "button";
@@ -2663,29 +2753,32 @@
           bottomCollapse.style.cssText = sectionToggle.style.cssText;
           sectionBottomRow.appendChild(bottomCollapse);
 
-          (function (body, toggle, sticky, bottom, anchor, title, hint) {
-            function setCollapsed(collapsed) {
+          (function (body, toggle, sticky, bottom, anchor, title, hint, collapseKey, initialCollapsed) {
+            function setCollapsed(collapsed, remember) {
               body.style.display = collapsed ? "none" : "block";
               if (hint) hint.style.display = collapsed ? "block" : "none";
               toggle.textContent = collapsed ? "▸ 展开" : "▾ 收起";
               toggle.title = collapsed ? "展开" + title : "收起" + title;
+              if (remember !== false && typeof ArxivDailyCenterWorkspace !== "undefined") {
+                ArxivDailyCenterWorkspace._setReportSectionCollapsed(collapseKey, collapsed);
+              }
               refreshReaderZoomLater(doc);
             }
             toggle.addEventListener("click", function (event) {
               event.preventDefault();
               event.stopPropagation();
-              setCollapsed(body.style.display !== "none");
+              setCollapsed(body.style.display !== "none", true);
             });
             [sticky, bottom].forEach(function (btn) {
               btn.addEventListener("click", function (event) {
                 event.preventDefault();
                 event.stopPropagation();
-                setCollapsed(true);
+                setCollapsed(true, true);
                 if (anchor && anchor.scrollIntoView) anchor.scrollIntoView({ block: "nearest" });
               });
             });
-            setCollapsed(true);
-          })(sectionBody, sectionToggle, stickyCollapse, bottomCollapse, h2, sectionTitle, collapsedHint);
+            setCollapsed(initialCollapsed, false);
+          })(sectionBody, sectionToggle, stickyCollapse, bottomCollapse, h2, sectionTitle, collapsedHint, sectionCollapseKey, initiallyCollapsed);
           shell.appendChild(sectionBody);
           sectionParent = sectionBody;
         }
@@ -3006,6 +3099,41 @@
       return Array.isArray(index) ? index : [];
     },
 
+    _projectEntryStillExists: function (arxivId) {
+      var id = baseArxivId(arxivId);
+      if (!id) return false;
+      var index = this._readProjectIndex();
+      for (var i = 0; i < index.length; i++) {
+        if (baseArxivId(index[i] && (index[i].arxivId || index[i].id || index[i].paperId)) === id) {
+          return true;
+        }
+      }
+      return false;
+    },
+
+    _markProjectItemCancelled: function (arxivId) {
+      var id = baseArxivId(arxivId);
+      if (id) this._projectItemCancelled[id] = Date.now();
+    },
+
+    _clearProjectItemCancelled: function (arxivId) {
+      var id = baseArxivId(arxivId);
+      if (id && this._projectItemCancelled[id]) delete this._projectItemCancelled[id];
+    },
+
+    _projectItemCreationShouldStop: function (arxivId) {
+      var id = baseArxivId(arxivId);
+      if (!id) return false;
+      return !!this._projectItemCancelled[id] || !this._projectEntryStillExists(id);
+    },
+
+    _projectItemCreationCancelledError: function (arxivId) {
+      var err = new Error("cancelled");
+      err.cancelled = true;
+      err.arxivId = baseArxivId(arxivId);
+      return err;
+    },
+
     _writeProjectIndex: function (index) {
       if (typeof ArxivDailyDataDir === "undefined") return false;
       return ArxivDailyDataDir.writeJSON("project-papers/index.json", Array.isArray(index) ? index : []);
@@ -3031,6 +3159,9 @@
         else next.push(index[i]);
       }
       if (!removed.length) return 0;
+      for (var r = 0; r < removed.length; r++) {
+        this._markProjectItemCancelled(removed[r] && (removed[r].arxivId || removed[r].id || removed[r].paperId));
+      }
       if (!this._writeProjectIndex(next)) throw new Error("Failed to write project-papers/index.json");
       if (options.deleteZoteroItems) await this._deleteProjectZoteroItemsAsync(removed);
       this._refreshProjectStateViews();
@@ -3096,6 +3227,7 @@
         var index = ArxivDailyDataDir.readJSON("project-papers/index.json");
         if (!Array.isArray(index)) index = [];
         var id = baseArxivId(paper.arxivId);
+        this._clearProjectItemCancelled(id);
         for (var i = 0; i < index.length; i++) {
           if (baseArxivId(index[i].arxivId || index[i].id || index[i].paperId) === id) {
             index[i].title = index[i].title || paper.title || id;
@@ -3197,6 +3329,14 @@
           }
           ArxivDailyDataDir.writeJSON("project-papers/index.json", latest);
           if (typeof ArxivDailyLeftPane !== "undefined") ArxivDailyLeftPane.refreshProjects();
+          if (typeof ArxivDailyCenterWorkspace !== "undefined") {
+            ArxivDailyCenterWorkspace._refreshProjectStateViews();
+            var win = ArxivDailyCenterWorkspace._win || (typeof Zotero !== "undefined" && Zotero.getMainWindow ? Zotero.getMainWindow() : null);
+            if (win && win.setTimeout) {
+              win.setTimeout(function () { try { ArxivDailyCenterWorkspace._refreshProjectStateViews(); } catch (e) {} }, 250);
+              win.setTimeout(function () { try { ArxivDailyCenterWorkspace._refreshProjectStateViews(); } catch (e) {} }, 900);
+            }
+          }
         } catch (updateErr) {
           logError("update project paper zotero item id failed: " + (updateErr.message || updateErr));
         }
@@ -3208,31 +3348,57 @@
       var self = this;
       var arxivId = baseArxivId(entry.arxivId);
       if (!arxivId) return null;
+      function notifySaved(patch) {
+        if (typeof onSaved !== "function" || !patch) return;
+        try { onSaved(Object.assign({}, patch)); } catch (notifyErr) {}
+      }
       if (this._projectItemCreation[arxivId]) {
         this._projectItemCreation[arxivId].then(function (patch) {
-          if (typeof onSaved === "function") onSaved(patch);
+          if (patch) notifySaved(patch);
         }).catch(function (err) {
-          if (typeof onSaved === "function") onSaved({ zoteroItemError: err.message || String(err) });
+          if (err && err.cancelled) return;
+          notifySaved({ zoteroItemError: err.message || String(err) });
         });
         return null;
       }
       this._projectItemCreation[arxivId] = (async function () {
         var patch = {};
+        var itemID = 0;
+        var collectionID = 0;
+        var shouldTrashOnCancel = false;
+        async function ensureActive() {
+          if (!self._projectItemCreationShouldStop(arxivId)) return;
+          try {
+            if (itemID && shouldTrashOnCancel) {
+              await self._trashZoteroItemIDs([itemID]);
+            }
+          } catch (cleanupErr) {
+            logError("cleanup cancelled project item failed: " + (cleanupErr.message || cleanupErr));
+          }
+          throw self._projectItemCreationCancelledError(arxivId);
+        }
         try {
+          await ensureActive();
           var collectionInfo = await self._ensureProjectPaperCollectionInfo(entry);
-          var collectionID = collectionInfo && collectionInfo.collectionID ? collectionInfo.collectionID : null;
+          collectionID = collectionInfo && collectionInfo.collectionID ? collectionInfo.collectionID : null;
           if (!collectionID || !self._collectionExists(collectionID)) {
             throw new Error("Project paper collection could not be created or is not visible");
           }
+          await ensureActive();
           var existing = await self._findExistingProjectZoteroItem(entry);
+          var lookedUp = false;
           if (!existing) {
+            await ensureActive();
             existing = await self._lookupProjectItemByIdentifier(entry, collectionID);
+            lookedUp = !!existing;
           }
           var item = existing || new Zotero.Item("journalArticle");
           if (!existing) item.libraryID = self._userLibraryID();
+          shouldTrashOnCancel = !existing || lookedUp;
+          await ensureActive();
           self._fillProjectZoteroItem(item, entry, collectionID);
           var saved = await item.saveTx();
-          var itemID = item.id || saved || entry.zoteroItemID || null;
+          itemID = item.id || saved || entry.zoteroItemID || null;
           if (itemID) {
             await self._ensureItemInCollection(itemID, collectionID, entry);
           }
@@ -3242,25 +3408,33 @@
           patch.zoteroItemError = "";
           patch.nativeCollectionMissing = false;
           if (collectionInfo && collectionInfo.path) patch.collectionPath = collectionInfo.path;
+          await ensureActive();
+          notifySaved(patch);
           if (itemID && (entry.feedback || entry.recommendation)) {
             var noteID = await self._attachFeedbackNoteToItem(itemID, entry);
             if (noteID) patch.noteID = noteID;
           }
+          await ensureActive();
           if (itemID) {
             var attachmentID = await self._attachProjectPdfToItem(itemID, entry);
             if (attachmentID) patch.pdfAttachmentID = attachmentID;
+            await ensureActive();
             await self._dedupeProjectZoteroItems(entry, itemID, collectionID);
           }
           return patch;
         } catch (err) {
+          if ((err && err.cancelled) || self._projectItemCreationShouldStop(arxivId)) {
+            throw self._projectItemCreationCancelledError(arxivId);
+          }
           logError("async Zotero item save failed: " + (err.message || err));
           throw err;
         }
       })();
       this._projectItemCreation[arxivId].then(function (patch) {
-        if (typeof onSaved === "function") onSaved(patch);
+        if (patch) notifySaved(patch);
       }).catch(function (err) {
-        if (typeof onSaved === "function") onSaved({ zoteroItemError: err.message || String(err) });
+        if (err && err.cancelled) return;
+        notifySaved({ zoteroItemError: err.message || String(err) });
       }).then(function () {
         delete self._projectItemCreation[arxivId];
       });
@@ -3832,6 +4006,9 @@
           }
         }
         if (next.length === index.length) return false;
+        for (var r = 0; r < removed.length; r++) {
+          this._markProjectItemCancelled(removed[r] && (removed[r].arxivId || removed[r].id || removed[r].paperId));
+        }
         if (!ArxivDailyDataDir.writeJSON("project-papers/index.json", next)) {
           throw new Error("Failed to write project-papers/index.json");
         }

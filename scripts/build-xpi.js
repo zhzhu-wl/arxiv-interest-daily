@@ -9,6 +9,9 @@ const zlib = require("zlib");
 const ROOT = path.resolve(__dirname, "..");
 const PLUGIN_DIR = path.join(ROOT, "plugin");
 const BUILD_DIR = path.join(ROOT, "build");
+const OUTPUT_DIR = process.env.XPI_OUTPUT_DIR
+  ? path.resolve(ROOT, process.env.XPI_OUTPUT_DIR)
+  : BUILD_DIR;
 const MANIFEST_PATH = path.join(PLUGIN_DIR, "manifest.json");
 const UPDATES_PATH = path.join(ROOT, "updates.json");
 
@@ -254,9 +257,9 @@ function main() {
   if (version !== manifest.version) {
     throw new Error(`Version argument ${version} does not match plugin/manifest.json ${manifest.version}`);
   }
-  ensureDir(BUILD_DIR);
-  const xpiName = `arxiv-interest-daily-v${manifest.version}.xpi`;
-  const outPath = path.join(BUILD_DIR, xpiName);
+  ensureDir(OUTPUT_DIR);
+  const xpiName = process.env.XPI_OUTPUT_NAME || `arxiv-interest-daily-v${manifest.version}.xpi`;
+  const outPath = path.join(OUTPUT_DIR, xpiName);
   const files = listFiles(PLUGIN_DIR);
   const entries = createZip(files, outPath);
   validateEntries(entries);

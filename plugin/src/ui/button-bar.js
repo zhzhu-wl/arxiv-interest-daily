@@ -317,6 +317,10 @@
           if (now - lastActionAt < 250) return;
           lastActionAt = now;
           if (btn.hasAttribute("disabled")) return;
+          if (typeof globalThis.ArxivDailyCenterWorkspace !== "undefined" &&
+              typeof globalThis.ArxivDailyCenterWorkspace.suppressNativeRestore === "function") {
+            globalThis.ArxivDailyCenterWorkspace.suppressNativeRestore(1200);
+          }
           if (typeof globalThis.ArxivDailyActions !== "undefined" &&
               typeof globalThis.ArxivDailyActions[def.action] === "function") {
             globalThis.ArxivDailyActions[def.action](btn, def.id, event || null);

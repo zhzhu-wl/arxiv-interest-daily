@@ -710,6 +710,10 @@
       log("openQA");
       try {
         syncReadiness();
+        if (typeof ArxivDailyCenterWorkspace !== "undefined" &&
+            ArxivDailyCenterWorkspace.suppressNativeRestore) {
+          ArxivDailyCenterWorkspace.suppressNativeRestore(1400);
+        }
         if (typeof ArxivDailyQA !== "undefined" && ArxivDailyQA.show) {
           ArxivDailyQA.show();
           return;
@@ -728,6 +732,10 @@
       log("toggleQA");
       try {
         syncReadiness();
+        if (typeof ArxivDailyCenterWorkspace !== "undefined" &&
+            ArxivDailyCenterWorkspace.suppressNativeRestore) {
+          ArxivDailyCenterWorkspace.suppressNativeRestore(1400);
+        }
         if (typeof ArxivDailyQA !== "undefined" && ArxivDailyQA.toggle) {
           ArxivDailyQA.toggle();
           return;
