@@ -30,6 +30,7 @@
     "cache/pdf",
     "cache/text",
     "cache/llm",
+    "cache/llm/raw-responses",
     "chat",
     "feedback",
     "tasks",

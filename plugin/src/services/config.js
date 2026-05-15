@@ -73,6 +73,7 @@
       maxCandidates: 80,
       selectionBatchSize: 8,
       llmBatchSize: 20,
+      llmRetryBatchSize: 5,
       llmPasses: 3,
       crossDisciplineMaxCandidates: 20,
     },

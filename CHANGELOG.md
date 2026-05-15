@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1 - 2026-05-15
+
+- Hardened LLM screening JSON parsing against fenced output, extra commentary, and nested response objects.
+- Added raw LLM response diagnostics under `cache/llm/raw-responses` when a batch cannot be parsed.
+- Added automatic small-batch retry for failed LLM prefilter/screening batches before falling back to keyword scoring.
+- Exposed `screening.llmRetryBatchSize` in settings and help text.
+
 ## 1.1.0 - 2026-05-13
 
 - Forked the Windows-only Zotero 9 plugin into a cross-platform release folder.
@@ -11,4 +18,3 @@
 ## 1.0.0 - 2026-05-13
 
 - Initial Windows + Zotero 9 release snapshot.
-

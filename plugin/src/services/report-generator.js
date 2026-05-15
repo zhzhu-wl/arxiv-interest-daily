@@ -153,31 +153,109 @@
 
   function stripJSONFence(text) {
     var raw = String(text || "").trim();
+    raw = raw.replace(/^\uFEFF/, "").trim();
     raw = raw.replace(/^```(?:json|JSON)?\s*/, "").replace(/\s*```$/, "").trim();
     return raw;
   }
 
-  function parseLLMSelectionResponse(text) {
-    var raw = stripJSONFence(text);
-    var parsed = null;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      var start = raw.indexOf("[");
-      var end = raw.lastIndexOf("]");
-      if (start < 0 || end <= start) throw e;
-      parsed = JSON.parse(raw.slice(start, end + 1));
-    }
-
+  function parseJSONCandidate(candidate) {
+    var parsed = JSON.parse(candidate);
     if (parsed && !Array.isArray(parsed) && typeof parsed === "object") {
-      parsed = parsed.papers || parsed.results || parsed.items || parsed.selections || parsed.data;
+      var nested = parsed.papers || parsed.results || parsed.items || parsed.selections || parsed.data;
+      if (nested !== undefined) parsed = nested;
     }
     if (!Array.isArray(parsed)) {
       throw new Error("LLM selection response is not a JSON array");
     }
-    return parsed.filter(function (item) {
-      return item && typeof item === "object";
-    });
+    return parsed;
+  }
+
+  function collectBalancedJSONCandidates(raw) {
+    var text = String(raw || "");
+    var candidates = [];
+    var start = -1;
+    var stack = [];
+    var inString = false;
+    var escape = false;
+
+    for (var i = 0; i < text.length; i++) {
+      var ch = text.charAt(i);
+      if (start < 0) {
+        if (ch === "[" || ch === "{") {
+          start = i;
+          stack = [ch === "[" ? "]" : "}"];
+          inString = false;
+          escape = false;
+        }
+        continue;
+      }
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch === "\\") {
+          escape = true;
+        } else if (ch === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === "\"") {
+        inString = true;
+      } else if (ch === "[" || ch === "{") {
+        stack.push(ch === "[" ? "]" : "}");
+      } else if (ch === "]" || ch === "}") {
+        if (!stack.length || stack[stack.length - 1] !== ch) {
+          start = -1;
+          stack = [];
+          continue;
+        }
+        stack.pop();
+        if (!stack.length) {
+          candidates.push(text.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  function parseLLMSelectionResponse(text) {
+    var raw = stripJSONFence(text);
+    var lastError = null;
+    try {
+      return parseJSONCandidate(raw).filter(function (item) {
+        return item && typeof item === "object";
+      });
+    } catch (e) {
+      lastError = e;
+    }
+
+    var candidates = collectBalancedJSONCandidates(raw);
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        return parseJSONCandidate(candidates[i]).filter(function (item) {
+          return item && typeof item === "object";
+        });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    var arrayMatch = raw.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      try {
+        return parseJSONCandidate(arrayMatch[0]).filter(function (item) {
+          return item && typeof item === "object";
+        });
+      } catch (arrayErr) {
+        lastError = arrayErr;
+      }
+    }
+
+    throw lastError || new Error("LLM selection response does not contain a parseable JSON array");
   }
 
   function paperById(papers, id) {
@@ -228,6 +306,105 @@
     return paper;
   }
 
+  function safeFilePart(value) {
+    return String(value || "")
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "unknown";
+  }
+
+  function responseLogName(batch, label, suffix) {
+    var date = new Date().toISOString().replace(/[:.]/g, "-");
+    var parts = [
+      date,
+      safeFilePart(label || "llm"),
+      "start-" + (batch && batch.startIdx !== undefined ? batch.startIdx : "x"),
+      "size-" + (batch && batch.batchSize !== undefined ? batch.batchSize : "x"),
+      "pass-" + (batch && batch.pass !== undefined ? batch.pass : "x"),
+    ];
+    if (suffix) parts.push(safeFilePart(suffix));
+    return "cache/llm/raw-responses/" + parts.join("_") + ".json";
+  }
+
+  function writeLLMResponseDiagnostic(batch, response, label, error, suffix) {
+    if (typeof ArxivDailyDataDir === "undefined" || !ArxivDailyDataDir.writeFile) return "";
+    var path = responseLogName(batch, label, suffix || "parse-failure");
+    var payload = {
+      savedAt: new Date().toISOString(),
+      label: label || "LLM",
+      startIdx: batch && batch.startIdx,
+      batchSize: batch && batch.batchSize,
+      pass: batch && batch.pass,
+      passes: batch && batch.passes,
+      error: error ? String(error.message || error) : "",
+      responseLength: String(response || "").length,
+      response: String(response || ""),
+    };
+    try {
+      if (ArxivDailyDataDir.writeFile(path, JSON.stringify(payload, null, 2))) return path;
+    } catch (e) {
+      logError("failed to save LLM response diagnostic: " + (e.message || e));
+    }
+    return "";
+  }
+
+  function parseBatchResponse(batchResult, candidates) {
+    var parsed = parseLLMSelectionResponse(batchResult.response);
+    var records = [];
+    var seenInBatch = {};
+    var parsedCount = 0;
+    for (var p = 0; p < parsed.length; p++) {
+      var paper = resolveSelectionPaper(parsed[p], p, batchResult, candidates);
+      if (paper) {
+        seenInBatch[baseArxivId(paper.arxivId)] = true;
+        records.push(applySelection(Object.assign({}, paper), parsed[p]));
+        parsedCount++;
+      }
+    }
+    return {
+      records: records,
+      seenInBatch: seenInBatch,
+      parsedCount: parsedCount,
+    };
+  }
+
+  async function retryFailedSelectionBatch(batchResult, candidates, options, originalError) {
+    if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.batchScreen) return null;
+    options = options || {};
+    var retryBatchSize = Math.max(1, parseInt(options.retryBatchSize || 5, 10) || 5);
+    var sourceBatchSize = parseInt(batchResult && batchResult.batchSize, 10) || 0;
+    if (sourceBatchSize <= 1 || retryBatchSize >= sourceBatchSize) return null;
+
+    var startIdx = parseInt(batchResult.startIdx, 10) || 0;
+    var batchPapers = candidates.slice(startIdx, startIdx + sourceBatchSize);
+    if (!batchPapers.length) return null;
+
+    emitProgress(options.onProgress, options.label + " 第 " + (options.batchNumber || "?") +
+      " 批解析失败，正在用 " + retryBatchSize + " 篇小批次重试", options.retryProgress || options.progressStart || 64);
+    log((options.label || "LLM") + " parse failed for batch starting " + startIdx +
+      "; retrying with batch size " + retryBatchSize + ": " + (originalError.message || originalError));
+
+    var retryOptions = Object.assign({}, options.llmOptions || {}, {
+      passes: 1,
+      parallelPasses: false,
+      taskLabel: options.taskLabel || "screening-retry",
+    });
+    var retryResults = await ArxivDailyLLM.batchScreen(
+      batchPapers,
+      options.systemPrompt,
+      retryBatchSize,
+      options.cancelToken,
+      retryOptions
+    );
+
+    for (var i = 0; i < retryResults.length; i++) {
+      retryResults[i].startIdx = startIdx + (parseInt(retryResults[i].startIdx, 10) || 0);
+      retryResults[i].pass = batchResult.pass;
+      retryResults[i].passes = batchResult.passes;
+    }
+    return retryResults;
+  }
+
   function fallbackSelectionBatch(batch, candidates, reason, minKeepScore, keepAll) {
     var selected = [];
     var threshold = Number.isFinite(parseFloat(minKeepScore)) ? parseFloat(minKeepScore) : 3;
@@ -245,10 +422,12 @@
     return selected;
   }
 
-  function parseBatchSelections(batchResults, candidates, options) {
+  async function parseBatchSelections(batchResults, candidates, options) {
     options = options || {};
     var records = [];
     var parseFailures = 0;
+    var recoveredFailures = 0;
+    var diagnostics = [];
     var label = options.label || "LLM";
     var minKeepScore = Number.isFinite(parseFloat(options.minKeepScore)) ? parseFloat(options.minKeepScore) : 3;
     var fallbackReason = options.fallbackReason || "LLM 结果不可解析，已按关键词分数兜底。";
@@ -263,19 +442,20 @@
       emitProgress(onProgress, "解析 " + label + " 结果: 第 " + (b + 1) + "/" + totalBatches + " 批", progressStart + Math.min(progressMax, b * progressStep));
       var response = batchResults[b].response;
       try {
-        var parsed = parseLLMSelectionResponse(response);
-        var parsedCount = 0;
-        var seenInBatch = {};
-        for (var p = 0; p < parsed.length; p++) {
-          var paper = resolveSelectionPaper(parsed[p], p, batchResults[b], candidates);
-          if (paper) {
-            seenInBatch[baseArxivId(paper.arxivId)] = true;
-            records.push(applySelection(Object.assign({}, paper), parsed[p]));
-            parsedCount++;
-          }
-        }
+        var parsedBatch = parseBatchResponse(batchResults[b], candidates);
+        var parsedCount = parsedBatch.parsedCount;
+        var seenInBatch = parsedBatch.seenInBatch;
+        records = records.concat(parsedBatch.records);
         if (parsedCount === 0) {
           parseFailures++;
+          var emptyPath = writeLLMResponseDiagnostic(
+            batchResults[b],
+            response,
+            label,
+            "Parsed JSON contained no resolvable paper records.",
+            "empty"
+          );
+          if (emptyPath) diagnostics.push(emptyPath);
           records = records.concat(fallbackSelectionBatch(
             batchResults[b],
             candidates,
@@ -298,8 +478,43 @@
         }
         emitProgress(onProgress, label + " 第 " + (b + 1) + " 批解析完成: " + parsedCount + "/" + batchResults[b].batchSize + " 篇", progressStart + 4 + Math.min(progressMax, b * progressStep));
       } catch (e) {
-        parseFailures++;
         logError(label + " parse error in batch " + b + ": " + (e.message || e));
+        var diagnosticPath = writeLLMResponseDiagnostic(batchResults[b], response, label, e, "parse-failure");
+        if (diagnosticPath) diagnostics.push(diagnosticPath);
+        var recovered = false;
+        if (options.retryOnParseFailure && options.systemPrompt) {
+          try {
+            var retryResults = await retryFailedSelectionBatch(
+              batchResults[b],
+              candidates,
+              Object.assign({}, options, {
+                batchNumber: b + 1,
+                retryProgress: progressStart + 4 + Math.min(progressMax, b * progressStep),
+              }),
+              e
+            );
+            if (retryResults && retryResults.length) {
+              var parsedRetry = await parseBatchSelections(retryResults, candidates, Object.assign({}, options, {
+                retryOnParseFailure: false,
+                label: label + " 小批重试",
+                progressStart: progressStart + 4 + Math.min(progressMax, b * progressStep),
+                progressStep: 1,
+                progressMax: Math.max(1, Math.min(4, progressMax)),
+              }));
+              records = records.concat(parsedRetry.records);
+              parseFailures += parsedRetry.parseFailures;
+              recoveredFailures += 1 + (parsedRetry.recoveredFailures || 0);
+              diagnostics = diagnostics.concat(parsedRetry.diagnostics || []);
+              recovered = true;
+              emitProgress(onProgress, label + " 第 " + (b + 1) + " 批已通过小批重试恢复", progressStart + 5 + Math.min(progressMax, b * progressStep));
+            }
+          } catch (retryErr) {
+            logError(label + " retry failed in batch " + b + ": " + (retryErr.message || retryErr));
+          }
+        }
+        if (recovered) continue;
+
+        parseFailures++;
         records = records.concat(fallbackSelectionBatch(
           batchResults[b],
           candidates,
@@ -311,7 +526,12 @@
       }
     }
 
-    return { records: records, parseFailures: parseFailures };
+    return {
+      records: records,
+      parseFailures: parseFailures,
+      recoveredFailures: recoveredFailures,
+      diagnostics: diagnostics,
+    };
   }
 
   function aggregateScreened(records, minScore) {
@@ -701,6 +921,7 @@
           prefilterPasses: Math.max(1, Math.min(5, parseInt(ArxivDailyConfig.get("screening.llmPrefilterPasses") || 3, 10) || 3)),
           selectionMode: ArxivDailyConfig.get("screening.selectionMode") || "llm",
           llmBatchSize: ArxivDailyConfig.get("screening.llmBatchSize") || 20,
+          llmRetryBatchSize: ArxivDailyConfig.get("screening.llmRetryBatchSize") || 5,
           llmPasses: Math.max(1, Math.min(5, parseInt(ArxivDailyConfig.get("screening.llmPasses") || 3, 10) || 3)),
           topN: ArxivDailyConfig.get("deepRead.topN") || 5,
           crossN: ArxivDailyConfig.get("deepRead.crossN") || 3,
@@ -860,18 +1081,26 @@
           throw stageError("LLM broad prefilter failed", e);
         }
 
-        var parsedPrefilter = parseBatchSelections(prefilterBatchResults, candidates, {
+        var parsedPrefilter = await parseBatchSelections(prefilterBatchResults, candidates, {
           label: "LLM 预筛",
           minKeepScore: config.prefilterMinScore,
           fallbackKeepAll: true,
           fallbackReason: "LLM 预筛结果不可解析，为避免关键词误杀，已宽松保留并进入正式评分。",
           missingReason: "LLM 预筛未返回这篇论文，为避免误杀，已宽松保留并进入正式评分。",
+          retryOnParseFailure: true,
+          retryBatchSize: config.llmRetryBatchSize,
+          systemPrompt: prefilterPrompt,
+          taskLabel: "prefilter-retry",
+          llmOptions: config.llmOptions,
+          cancelToken: cancelToken,
           onProgress: onProgress,
           progressStart: 40,
           progressStep: 3,
           progressMax: 14,
         });
         reportMeta.prefilterParseFailures = parsedPrefilter.parseFailures;
+        reportMeta.prefilterRecoveredFailures = parsedPrefilter.recoveredFailures;
+        reportMeta.prefilterDiagnostics = parsedPrefilter.diagnostics;
 
         var prefilterSource = candidates.slice();
         var prefiltered = markPrefilterResults(
@@ -941,11 +1170,17 @@
           throw stageError("LLM relevance screening failed", e);
         }
 
-        var parsedScreening = parseBatchSelections(batchResults, candidates, {
+        var parsedScreening = await parseBatchSelections(batchResults, candidates, {
           label: "LLM 筛选",
           minKeepScore: config.minScore,
           fallbackReason: "LLM 筛选结果不可解析，已按关键词分数兜底。",
           missingReason: "LLM 未返回这篇论文的筛选项，已按关键词分数兜底。",
+          retryOnParseFailure: true,
+          retryBatchSize: config.llmRetryBatchSize,
+          systemPrompt: prompt,
+          taskLabel: "screening-retry",
+          llmOptions: config.llmOptions,
+          cancelToken: cancelToken,
           onProgress: onProgress,
           progressStart: 60,
           progressStep: 3,
@@ -953,6 +1188,8 @@
         });
         screened = parsedScreening.records;
         reportMeta.llmParseFailures = parsedScreening.parseFailures;
+        reportMeta.llmRecoveredFailures = parsedScreening.recoveredFailures;
+        reportMeta.llmDiagnostics = parsedScreening.diagnostics;
       } else {
         log("LLM screening skipped");
         for (var sk = 0; sk < candidates.length; sk++) {
@@ -1178,6 +1415,10 @@
         }
         lines.push("- 相关性评分论文数: " + (meta.screenedCount || 0));
         if (meta.keywordPrefilterBypassed) lines.push("- 关键词处理: LLM 模式使用宽松 LLM 预筛替代关键词预筛；关键词仅作为排序与兜底特征");
+        if (meta.prefilterRecoveredFailures) lines.push("- 预筛恢复: " + meta.prefilterRecoveredFailures + " 个 LLM 批次解析失败后已自动小批重试恢复");
+        if (meta.llmRecoveredFailures) lines.push("- 筛选恢复: " + meta.llmRecoveredFailures + " 个 LLM 批次解析失败后已自动小批重试恢复");
+        if (meta.prefilterParseFailures) lines.push("- 预筛解析兜底: " + meta.prefilterParseFailures + " 个 LLM 批次仍不可解析，原始响应已保存到 cache/llm/raw-responses");
+        if (meta.llmParseFailures) lines.push("- 筛选解析兜底: " + meta.llmParseFailures + " 个 LLM 批次仍不可解析，原始响应已保存到 cache/llm/raw-responses");
         if (meta.prefilterFallback) lines.push("- 预筛提示: LLM 预筛没有保留论文，已回退到全部候选进入正式评分");
         if (meta.selectionWarning) lines.push("- 筛选提示: " + meta.selectionWarning);
         if (meta.deepReadWarning) lines.push("- 导读提示: " + meta.deepReadWarning);

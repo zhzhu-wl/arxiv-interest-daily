@@ -787,6 +787,7 @@
     setVal(doc, "cfg-max-candidates", cfg.get("screening.maxCandidates") || 80);
     setVal(doc, "cfg-selection-batch-size", cfg.get("screening.selectionBatchSize") || 8);
     setVal(doc, "cfg-llm-batch-size", cfg.get("screening.llmBatchSize") || 20);
+    setVal(doc, "cfg-llm-retry-batch-size", cfg.get("screening.llmRetryBatchSize") || 5);
     setVal(doc, "cfg-llm-passes", cfg.get("screening.llmPasses") || 3);
     setVal(doc, "cfg-cross-max-candidates", cfg.get("screening.crossDisciplineMaxCandidates") || 20);
 
@@ -891,6 +892,7 @@
     cfg.set("screening.maxCandidates", getNumber(doc, "cfg-max-candidates", 80));
     cfg.set("screening.selectionBatchSize", getNumber(doc, "cfg-selection-batch-size", 8));
     cfg.set("screening.llmBatchSize", getNumber(doc, "cfg-llm-batch-size", 20));
+    cfg.set("screening.llmRetryBatchSize", getNumber(doc, "cfg-llm-retry-batch-size", 5));
     cfg.set("screening.llmPasses", getNumber(doc, "cfg-llm-passes", 3));
     cfg.set("screening.crossDisciplineMaxCandidates", getNumber(doc, "cfg-cross-max-candidates", 20));
 
@@ -1301,6 +1303,7 @@
     addField(doc, advanced.body, "LLM 最大候选", makeInput(doc, "cfg-max-candidates", "number"));
     addField(doc, advanced.body, "候选批大小", makeInput(doc, "cfg-selection-batch-size", "number"));
     addField(doc, advanced.body, "LLM 批大小", makeInput(doc, "cfg-llm-batch-size", "number"));
+    addField(doc, advanced.body, "LLM 解析失败重试批大小", makeInput(doc, "cfg-llm-retry-batch-size", "number"));
     addField(doc, advanced.body, "LLM 筛选轮数", makeInput(doc, "cfg-llm-passes", "number"));
     addField(doc, advanced.body, "交叉方向候选", makeInput(doc, "cfg-cross-max-candidates", "number"));
 
