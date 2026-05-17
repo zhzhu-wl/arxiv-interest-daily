@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2 - 2026-05-17
+
+- Reports now write complete abstracts instead of truncating them with trailing ellipses.
+- Report abstracts are localized to the configured report language through the report LLM model, with cached translations for repeat builds.
+
 ## 1.1.1 - 2026-05-15
 
 - Hardened LLM screening JSON parsing against fenced output, extra commentary, and nested response objects.

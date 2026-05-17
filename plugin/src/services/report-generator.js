@@ -786,11 +786,112 @@
     ].join("\n\n");
   }
 
-  function shortAbstract(paper, limit) {
-    var text = String((paper && paper.abstract) || "").replace(/\s+/g, " ").trim();
-    if (!text) return "";
-    limit = limit || 520;
-    return text.slice(0, limit) + (text.length > limit ? "..." : "");
+  function fullAbstract(paper) {
+    return String((paper && (paper.localizedAbstract || paper.abstract)) || "").replace(/\s+/g, " ").trim();
+  }
+
+  function normalizeLocale(value) {
+    var locale = String(value || "").trim();
+    if (/^zh/i.test(locale)) return "zh-CN";
+    if (/^en/i.test(locale)) return "en-US";
+    return locale || "zh-CN";
+  }
+
+  function reportLocaleFromConfig() {
+    var reportLocale = "";
+    var uiLocale = "";
+    try {
+      if (typeof ArxivDailyConfig !== "undefined") {
+        reportLocale = ArxivDailyConfig.get("ui.reportLocale") || "";
+        uiLocale = ArxivDailyConfig.get("ui.locale") || "";
+      }
+    } catch (e) {}
+    if (!uiLocale) {
+      try { uiLocale = (typeof Zotero !== "undefined" && Zotero.locale) || ""; } catch (e2) {}
+    }
+    return normalizeLocale(reportLocale || uiLocale || "zh-CN");
+  }
+
+  function languageName(locale) {
+    locale = normalizeLocale(locale);
+    if (/^zh/i.test(locale)) return "Simplified Chinese";
+    if (/^en/i.test(locale)) return "English";
+    return locale;
+  }
+
+  function shouldTranslateAbstract(text, locale) {
+    text = String(text || "").trim();
+    if (!text) return false;
+    locale = normalizeLocale(locale);
+    if (/^zh/i.test(locale)) return !/[\u4e00-\u9fff]/.test(text);
+    if (/^en/i.test(locale)) return /[\u4e00-\u9fff]/.test(text);
+    return false;
+  }
+
+  function textHash(text) {
+    var hash = 2166136261;
+    text = String(text || "");
+    for (var i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  function abstractTranslationCacheKey(paper, locale, source) {
+    return [baseArxivId(paper && paper.arxivId) || paperKey(paper), normalizeLocale(locale), textHash(source)].join("::");
+  }
+
+  function readAbstractTranslationCache() {
+    try {
+      if (typeof ArxivDailyDataDir === "undefined" || !ArxivDailyDataDir.readJSON) return {};
+      return ArxivDailyDataDir.readJSON("cache/llm/abstract-translations.json") || {};
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function writeAbstractTranslationCache(cache) {
+    try {
+      if (typeof ArxivDailyDataDir === "undefined" || !ArxivDailyDataDir.writeJSON) return;
+      ArxivDailyDataDir.writeJSON("cache/llm/abstract-translations.json", cache || {});
+    } catch (e) {
+      logError("abstract translation cache write failed: " + (e.message || e));
+    }
+  }
+
+  function collectUniquePapersForAbstracts(groups) {
+    var seen = {};
+    var out = [];
+    for (var g = 0; g < (groups || []).length; g++) {
+      var papers = groups[g] || [];
+      for (var i = 0; i < papers.length; i++) {
+        var paper = papers[i];
+        var key = paperKey(paper);
+        if (!key || seen[key]) continue;
+        seen[key] = true;
+        out.push(paper);
+      }
+    }
+    return out;
+  }
+
+  function buildAbstractTranslationPrompt(items, locale) {
+    var target = languageName(locale);
+    return [
+      "Translate the following arXiv abstracts into " + target + ".",
+      "Preserve the complete scientific content, equations, symbols, acronyms, citations, and technical terms.",
+      "Do not summarize, omit, shorten, add commentary, or end with ellipses.",
+      "Make the translation grammatically natural in " + target + ".",
+      "Return only a valid JSON array. Do not include Markdown fences.",
+      "Each object must have exactly these fields: arxiv_id, abstract.",
+      "",
+      JSON.stringify(items)
+    ].join("\n");
+  }
+
+  function looksTruncated(text) {
+    return /(\.\.\.|…)\s*$/.test(String(text || "").trim());
   }
 
   function cacheArxivMetadata(papers) {
@@ -890,6 +991,25 @@
 
   // ── Module ────────────────────────────────────────────────────────────────
 
+  function parseAbstractTranslationResponse(text) {
+    var raw = stripJSONFence(text);
+    try {
+      return parseJSONCandidate(raw).filter(function (item) {
+        return item && typeof item === "object";
+      });
+    } catch (e) {
+      var candidates = collectBalancedJSONCandidates(raw);
+      for (var i = 0; i < candidates.length; i++) {
+        try {
+          return parseJSONCandidate(candidates[i]).filter(function (item) {
+            return item && typeof item === "object";
+          });
+        } catch (err) {}
+      }
+      throw e;
+    }
+  }
+
   globalThis.ArxivDailyReportGenerator = {
 
     // Check if user can generate a report
@@ -933,8 +1053,10 @@
           outputMinCoreScore: ArxivDailyConfig.get("output.minCoreScore") || 2,
           outputMinCrossScore: ArxivDailyConfig.get("output.minCrossScore") || 1,
           outputCrossFallbackN: ArxivDailyConfig.get("output.crossFallbackN") || 4,
+          reportLocale: reportLocaleFromConfig(),
         };
       }
+      if (!config.reportLocale) config.reportLocale = reportLocaleFromConfig();
       if (options.noLLM) config.selectionMode = "keyword";
       config.llmOptions = (!options.noLLM && options.modelRef) ? { kind: "report", modelRef: options.modelRef } : { kind: "report" };
       var llmConfiguredForReport = !options.noLLM &&
@@ -1264,6 +1386,13 @@
       annotatePriorReports(guessPapers, priorReportMap);
       annotatePriorReports(prefilterRejected, priorReportMap);
 
+      await this._localizeAbstracts([
+        topPapers,
+        screened,
+        guessPapers,
+        prefilterRejected,
+      ], config, cancelToken, onProgress);
+
       var md = this._buildMarkdown(dateStr, topPapers, config, reportMeta, {
         guessPapers: guessPapers,
         weakRelatedSource: screened,
@@ -1349,6 +1478,85 @@
           }
         }
       }
+    },
+
+    _localizeAbstracts: async function (groups, config, cancelToken, onProgress) {
+      var locale = normalizeLocale((config && config.reportLocale) || reportLocaleFromConfig());
+      var papers = collectUniquePapersForAbstracts(groups);
+      if (!papers.length) return;
+
+      for (var i = 0; i < papers.length; i++) {
+        papers[i].localizedAbstract = fullAbstract(papers[i]);
+      }
+
+      var needs = papers.filter(function (paper) {
+        return shouldTranslateAbstract(paper.abstract, locale);
+      });
+      if (!needs.length) return;
+
+      if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured(config.llmOptions)) {
+        log("abstract translation skipped: LLM not configured for report");
+        return;
+      }
+
+      var cache = readAbstractTranslationCache();
+      var pending = [];
+      for (var n = 0; n < needs.length; n++) {
+        var source = String(needs[n].abstract || "").replace(/\s+/g, " ").trim();
+        var key = abstractTranslationCacheKey(needs[n], locale, source);
+        var cached = cache[key] && String(cache[key].abstract || "").trim();
+        if (cached && !looksTruncated(cached)) {
+          needs[n].localizedAbstract = cached;
+        } else {
+          pending.push({ paper: needs[n], key: key, source: source });
+        }
+      }
+      if (!pending.length) return;
+
+      emitProgress(onProgress, "Translating full abstracts for report language: " + pending.length, 87);
+      var batchSize = 8;
+      for (var start = 0; start < pending.length; start += batchSize) {
+        if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
+        var batch = pending.slice(start, start + batchSize);
+        var items = batch.map(function (entry) {
+          return {
+            arxiv_id: baseArxivId(entry.paper.arxivId),
+            title: entry.paper.title || "",
+            abstract: entry.source,
+          };
+        });
+        try {
+          var prompt = buildAbstractTranslationPrompt(items, locale);
+          var response = await ArxivDailyLLM.complete(
+            "You are a careful scientific translator. Return only valid JSON.",
+            prompt,
+            cancelToken,
+            Object.assign({}, config.llmOptions, { maxTokens: 12000, temperature: 0.1 })
+          );
+          var parsed = parseAbstractTranslationResponse(response);
+          var byId = {};
+          for (var p = 0; p < parsed.length; p++) {
+            var id = baseArxivId(parsed[p].arxiv_id || parsed[p].arxivId || parsed[p].id);
+            var text = String(parsed[p].abstract || parsed[p].translation || "").trim();
+            if (id && text && !looksTruncated(text)) byId[id] = text.replace(/\s+/g, " ");
+          }
+          for (var b = 0; b < batch.length; b++) {
+            var translated = byId[baseArxivId(batch[b].paper.arxivId)];
+            if (!translated) continue;
+            batch[b].paper.localizedAbstract = translated;
+            cache[batch[b].key] = {
+              arxivId: baseArxivId(batch[b].paper.arxivId),
+              locale: locale,
+              abstract: translated,
+              sourceHash: textHash(batch[b].source),
+              cachedAt: new Date().toISOString(),
+            };
+          }
+        } catch (e) {
+          logError("abstract translation batch failed: " + (e.message || e));
+        }
+      }
+      writeAbstractTranslationCache(cache);
     },
 
     _buildGuessYouLike: async function (rankedPapers, config, cancelToken, onProgress) {
@@ -1613,13 +1821,7 @@
         lines.push("");
         lines.push("**摘要**:");
         lines.push("");
-        if (options.other) {
-          lines.push(shortAbstract(paper, 1200));
-        } else if (options.brief) {
-          lines.push(shortAbstract(paper, options.skim ? 620 : 360));
-        } else {
-          lines.push(shortAbstract(paper, 900));
-        }
+        lines.push(fullAbstract(paper));
       }
       if (options.guide) {
         lines.push("");

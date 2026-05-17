@@ -256,9 +256,25 @@
     if (chosen) {
       cfg = Object.assign({}, cfg || {}, chosen);
       cfg.model = parsed.model || chosen.model || cfg.model || "";
-      return cfg;
+      return applyCompletionOverrides(cfg, options);
     }
     if (parsed.model && cfg) cfg = Object.assign({}, cfg, { model: parsed.model });
+    return applyCompletionOverrides(cfg, options);
+  }
+
+  function applyCompletionOverrides(cfg, options) {
+    if (!cfg) return cfg;
+    options = options || {};
+    cfg = Object.assign({}, cfg);
+    if (options.temperature !== undefined) {
+      cfg.temperature = numericValue(options.temperature, cfg.temperature, 0, 2);
+    }
+    if (options.maxTokens !== undefined) {
+      cfg.maxTokens = Math.round(numericValue(options.maxTokens, cfg.maxTokens, 1, 1000000));
+    }
+    if (options.timeoutSeconds !== undefined) {
+      cfg.timeoutSeconds = Math.round(numericValue(options.timeoutSeconds, cfg.timeoutSeconds, 30, 600));
+    }
     return cfg;
   }
 
