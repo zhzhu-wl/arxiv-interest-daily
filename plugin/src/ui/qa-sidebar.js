@@ -1190,12 +1190,41 @@
 
   function activeZoteroReader() {
     var win = mainWindow();
-    if (!win || !win.ZoteroPane || !win.ZoteroPane.getActiveReader) return null;
     try {
-      return win.ZoteroPane.getActiveReader();
-    } catch (e) {
-      return null;
-    }
+      if (win && win.ZoteroPane && win.ZoteroPane.getActiveReader) {
+        var active = win.ZoteroPane.getActiveReader();
+        if (active) return active;
+      }
+    } catch (e) {}
+    try {
+      var selectedID = win && win.Zotero_Tabs && (win.Zotero_Tabs.selectedID || win.Zotero_Tabs._selectedID);
+      var zr = (typeof Zotero !== "undefined" && Zotero.Reader) ||
+        (win && win.Zotero && win.Zotero.Reader);
+      if (zr && selectedID && typeof zr.getByTabID === "function") {
+        var byTab = zr.getByTabID(selectedID);
+        if (byTab) return byTab;
+      }
+    } catch (e2) {}
+    try {
+      var readers = allZoteroReaders();
+      var best = null;
+      var bestScore = -Infinity;
+      for (var i = 0; i < readers.length; i++) {
+        var reader = readers[i];
+        var internal = unwrapReader(reader);
+        var score = 0;
+        if (reader && (reader._isActive || reader.active || reader.selected)) score += 1000;
+        if (internal && (internal._isActive || internal.active || internal.selected)) score += 1000;
+        if (reader && readerWindowCandidates(reader).length) score += 100;
+        score += Number(reader && reader._lastActiveTime || internal && internal._lastActiveTime || reader && reader.lastActiveTime || 0) / 1000000000000;
+        if (score > bestScore) {
+          bestScore = score;
+          best = reader;
+        }
+      }
+      return best;
+    } catch (e3) {}
+    return null;
   }
 
   function unwrapReader(reader) {
@@ -1238,16 +1267,48 @@
       if (!win || windows.indexOf(win) >= 0) return;
       windows.push(win);
     }
+    function addFrames(doc, depth) {
+      if (!doc || !doc.querySelectorAll || depth > 3) return;
+      var frames = [];
+      try {
+        frames = doc.querySelectorAll("iframe,browser,frame");
+      } catch (e0) {
+        frames = [];
+      }
+      for (var i = 0; i < frames.length; i++) {
+        var frame = frames[i];
+        var childWin = null;
+        try { childWin = frame.contentWindow; } catch (e1) {}
+        if (!childWin) {
+          try { childWin = frame.contentDocument && frame.contentDocument.defaultView; } catch (e2) {}
+        }
+        add(childWin);
+        try { addFrames(childWin && childWin.document, depth + 1); } catch (e3) {}
+      }
+    }
     try {
       var internal = unwrapReader(reader);
       add(reader && reader._iframeWindow);
       add(reader && reader._iframe && reader._iframe.contentWindow);
       add(reader && reader._browser && reader._browser.contentWindow);
+      add(reader && reader._browser && reader._browser._contentWindow);
+      add(reader && reader._browser && reader._browser.browsingContext && reader._browser.browsingContext.currentWindowGlobal && reader._browser.browsingContext.currentWindowGlobal.document && reader._browser.browsingContext.currentWindowGlobal.document.defaultView);
       add(internal && internal._iframeWindow);
       add(internal && internal._iframe && internal._iframe.contentWindow);
+      add(internal && internal._browser && internal._browser.contentWindow);
       add(internal && internal._primaryView && internal._primaryView._iframeWindow);
+      add(internal && internal._primaryView && internal._primaryView._iframe && internal._primaryView._iframe.contentWindow);
+      add(internal && internal._primaryView && internal._primaryView._browser && internal._primaryView._browser.contentWindow);
       add(internal && internal._secondaryView && internal._secondaryView._iframeWindow);
+      add(internal && internal._secondaryView && internal._secondaryView._iframe && internal._secondaryView._iframe.contentWindow);
+      add(internal && internal._secondaryView && internal._secondaryView._browser && internal._secondaryView._browser.contentWindow);
       add(internal && internal._lastView && internal._lastView._iframeWindow);
+      add(internal && internal._lastView && internal._lastView._iframe && internal._lastView._iframe.contentWindow);
+      add(internal && internal._lastView && internal._lastView._browser && internal._lastView._browser.contentWindow);
+      add(mainWindow());
+      for (var w = 0; w < windows.length; w++) {
+        try { addFrames(windows[w] && windows[w].document, 0); } catch (e4) {}
+      }
     } catch (e) {}
     return windows;
   }
@@ -2091,6 +2152,153 @@
       }
     } catch (e2) {}
     return "";
+  }
+
+  function readerPageValueFromObjects(reader, internal, view, pdfViewer) {
+    var props = [
+      "currentPageNumber", "currentPage", "page", "pageIndex",
+      "_currentPageNumber", "_currentPageIndex", "_pageIndex",
+      "_lastPageIndex", "lastPageIndex",
+    ];
+    var state = null;
+    try { state = reader && reader._state || reader && reader.state || internal && internal._state || internal && internal.state || null; } catch (e0) {}
+    var owners = [state, pdfViewer, view, internal, reader];
+    for (var i = 0; i < owners.length; i++) {
+      var owner = owners[i];
+      if (!owner) continue;
+      for (var p = 0; p < props.length; p++) {
+        try {
+          var value = owner[props[p]];
+          if (value !== undefined && value !== null && value !== "") return value;
+        } catch (e) {}
+      }
+    }
+    return "";
+  }
+
+  function normalizeReaderPageNumber(page) {
+    if (page === undefined || page === null || page === "") return "";
+    var num = parseInt(page, 10);
+    if (!isFinite(num)) return String(page);
+    if (num >= 0 && String(page).indexOf(String(num)) === 0 && /index/i.test(String(page))) return String(num + 1);
+    if (num === 0 && String(page) === "0") return "1";
+    return String(num);
+  }
+
+  function readerPageDocumentLooksLikePDF(doc) {
+    try {
+      return !!(doc && doc.querySelector &&
+        (doc.querySelector(".page[data-page-number]") ||
+         doc.querySelector(".textLayer") ||
+         doc.querySelector("#viewer") ||
+         doc.querySelector("#viewerContainer")));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function visibleReaderPageElementInWindow(win) {
+    try {
+      var doc = win && win.document;
+      if (!doc || !doc.querySelectorAll || !readerPageDocumentLooksLikePDF(doc)) return null;
+      var pages = doc.querySelectorAll(".page[data-page-number]");
+      var best = null;
+      var bestScore = -Infinity;
+      var vh = win.innerHeight || doc.documentElement.clientHeight || 800;
+      var centerY = Math.max(0, vh * 0.5);
+      for (var j = 0; j < pages.length; j++) {
+        var page = pages[j];
+        var rect = page.getBoundingClientRect ? page.getBoundingClientRect() : null;
+        if (!rect || rect.bottom <= 0 || rect.top >= vh || rect.height <= 0) continue;
+        var visible = Math.max(0, Math.min(rect.bottom, vh) - Math.max(rect.top, 0));
+        var centerDistance = Math.abs(((rect.top + rect.bottom) / 2) - centerY);
+        var score = visible * 1000 - centerDistance;
+        if (score > bestScore) {
+          bestScore = score;
+          best = page;
+        }
+      }
+      return best;
+    } catch (e) {}
+    return null;
+  }
+
+  function currentReaderPageElement(reader, pageHint, preferVisible) {
+    try {
+      var normalized = normalizeReaderPageNumber(pageHint);
+      var windows = readerWindowCandidates(reader);
+      for (var w = 0; w < windows.length; w++) {
+        if (preferVisible) {
+          var visible = visibleReaderPageElementInWindow(windows[w]);
+          if (visible) return visible;
+        }
+        var doc = windows[w] && windows[w].document;
+        if (!doc || !doc.querySelectorAll) continue;
+        if (normalized) {
+          var exact = doc.querySelector('.page[data-page-number="' + normalized.replace(/"/g, '\\"') + '"]');
+          if (exact) return exact;
+        }
+        var pages = doc.querySelectorAll(".page[data-page-number]");
+        var best = null;
+        var bestScore = Infinity;
+        var vh = windows[w].innerHeight || doc.documentElement.clientHeight || 800;
+        for (var j = 0; j < pages.length; j++) {
+          var rect = pages[j].getBoundingClientRect ? pages[j].getBoundingClientRect() : null;
+          if (!rect || rect.bottom < 0 || rect.top > vh) continue;
+          var score = Math.abs(rect.top);
+          if (score < bestScore) {
+            bestScore = score;
+            best = pages[j];
+          }
+        }
+        if (best) return best;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function extractReaderPageText(pageEl, maxChars) {
+    try {
+      if (!pageEl) return "";
+      var textRoot = null;
+      try {
+        textRoot = pageEl.querySelector(".textLayer") || pageEl;
+      } catch (e0) {
+        textRoot = pageEl;
+      }
+      var text = cleanText(textRoot && textRoot.textContent || "").replace(/\s+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+      if (!text) return "";
+      if (maxChars && text.length > maxChars) text = text.slice(0, maxChars);
+      return text;
+    } catch (e) {}
+    return "";
+  }
+
+  function currentReaderPageSnapshot(reader, pageHint, maxChars) {
+    var out = { page: "", text: "", source: "" };
+    try {
+      var visiblePage = currentReaderPageElement(reader, "", true);
+      if (visiblePage) {
+        out.page = normalizeReaderPageNumber(visiblePage.getAttribute("data-page-number") || pageHint || "");
+        out.text = extractReaderPageText(visiblePage, maxChars);
+        out.source = "pdfjs-visible-page";
+        return out;
+      }
+      var exactPage = currentReaderPageElement(reader, pageHint, false);
+      if (exactPage) {
+        out.page = normalizeReaderPageNumber(exactPage.getAttribute("data-page-number") || pageHint || "");
+        out.text = extractReaderPageText(exactPage, maxChars);
+        out.source = "pdfjs-hinted-page";
+        return out;
+      }
+      out.page = normalizeReaderPageNumber(pageHint || "");
+      out.source = out.page ? "reader-state" : "";
+    } catch (e) {}
+    return out;
+  }
+
+  function currentReaderPageText(reader, pageHint, maxChars) {
+    return currentReaderPageSnapshot(reader, pageHint, maxChars).text || "";
   }
 
   function activeContextKey() {
@@ -3554,8 +3762,11 @@
         ".ari-qa-iconbtn:hover{background:rgba(0,0,0,.07)}",
         ".ari-qa-context{padding:5px 8px;color:GrayText;background:rgba(0,0,0,.035);border-bottom:1px solid rgba(0,0,0,.08);font-size:11px;line-height:1.35;flex:0 0 auto;max-height:52px;overflow:auto}",
         ".ari-qa-messages{flex:1 1 0;overflow:auto;padding:8px;background:Canvas;min-height:0;max-height:100%;box-sizing:border-box}",
-        ".ari-qa-message{padding:7px 9px;margin:0 0 7px;border-radius:5px;line-height:1.48;white-space:normal;user-select:text}",
-        ".ari-qa-message-tools{display:flex;justify-content:flex-end;margin-top:5px}",
+        ".ari-qa-message{padding:7px 9px;margin:0 0 7px;border-radius:5px;line-height:1.48;white-space:normal;user-select:text;-moz-user-select:text;cursor:text}",
+        ".ari-qa-message *{user-select:text;-moz-user-select:text}",
+        ".ari-qa-message-tools{display:flex;justify-content:flex-end;gap:5px;margin-top:5px;user-select:none;-moz-user-select:none}",
+        ".ari-qa-message-tools button{font-size:11px;border:1px solid ThreeDShadow;border-radius:3px;background:ButtonFace;color:ButtonText;padding:1px 6px;cursor:pointer;user-select:none;-moz-user-select:none}",
+        ".ari-qa-message-tools button:hover{background:rgba(0,0,0,.07)}",
         ".ari-qa-retry{font-size:11px;border:1px solid ThreeDShadow;border-radius:3px;background:ButtonFace;color:ButtonText;padding:1px 6px}",
         ".ari-qa-user{background:rgba(0,0,0,.07);margin-left:24px}",
         ".ari-qa-assistant{background:rgba(27,110,194,.10);margin-right:12px}",
@@ -3826,6 +4037,9 @@
         topTitle: "",
         topKind: "",
         readerItemID: null,
+        readerPage: "",
+        readerPageText: "",
+        readerPageSource: "",
         selectedItemID: null,
         readerTitle: "",
         selectedTitle: "",
@@ -3853,12 +4067,25 @@
 
       var win = mainWindow();
       try {
-        if (win && win.ZoteroPane && win.ZoteroPane.getActiveReader) {
-          var reader = win.ZoteroPane.getActiveReader();
+        if (win) {
+          var reader = activeZoteroReader();
           if (reader && reader.itemID && typeof Zotero !== "undefined" && Zotero.Items) {
             snapshot.readerItemID = reader.itemID;
             var readerItem = Zotero.Items.get(reader.itemID);
             if (readerItem) snapshot.readerTitle = readerItem.getField("title") || "";
+          }
+          if (reader) {
+            var internal = unwrapReader(reader);
+            var view = internal && (internal._primaryView || internal._lastView || internal._lastViewPrimary || null);
+            var pdfViewer = view && (view._pdfViewer || view.pdfViewer) ||
+              internal && (internal._pdfViewer || internal.pdfViewer) ||
+              reader && (reader._pdfViewer || reader.pdfViewer);
+            var page = readerPageValueFromObjects(reader, internal, view, pdfViewer) ||
+              readerPageHint(reader, internal, view, pdfViewer);
+            var pageSnapshot = currentReaderPageSnapshot(reader, page, 24000);
+            snapshot.readerPage = pageSnapshot.page || normalizeReaderPageNumber(page);
+            snapshot.readerPageText = pageSnapshot.text || "";
+            snapshot.readerPageSource = pageSnapshot.source || "";
           }
         }
       } catch (e) {}
@@ -3936,6 +4163,7 @@
       this._clearPendingSelectionIfContextChanged();
       var ctx = this._captureContext();
       var parts = [];
+      if (ctx.readerPage) parts.push("Current page: " + ctx.readerPage + (ctx.readerPageText ? " (page text captured)" : ""));
       if (ctx.topTitle) parts.push("最上层页面: " + ctx.topTitle);
       if (ctx.readerTitle) parts.push("正在阅读: " + ctx.readerTitle);
       if (ctx.selectedTitle) parts.push("选中条目: " + ctx.selectedTitle);
@@ -3958,6 +4186,12 @@
         );
       }
       if (ctx.topTitle) lines.push("Top visible plugin reading page: " + ctx.topTitle);
+      if (ctx.readerPage) {
+        lines.push("The plugin has detected the current Zotero PDF reader page as page " + ctx.readerPage + ". Treat this as the user's current reading page unless the user says otherwise.");
+      }
+      if (ctx.readerPageText) {
+        lines.push("Full text extracted from the currently visible Zotero PDF page" + (ctx.readerPage ? " (page " + ctx.readerPage + ")" : "") + ":\n" + ctx.readerPageText);
+      }
       if (ctx.readerTitle) lines.push("Current Zotero reader item: " + ctx.readerTitle);
       if (ctx.selectedTitle) lines.push("Selected Zotero item: " + ctx.selectedTitle);
       if (ctx.contextText) lines.push(ctx.contextText);
@@ -4347,16 +4581,39 @@
           node.appendChild(think);
         }
         appendPlainMessage(box.ownerDocument, node, msg.content);
-        if (msg.error && msg.retryText) {
+        if ((msg.role === "assistant" && cleanText(msg.content || "")) || (msg.error && msg.retryText)) {
           var tools = create(box.ownerDocument, "div", "ari-qa-message-tools");
-          var retry = create(box.ownerDocument, "button", "ari-qa-retry", "重试");
+          if (msg.role === "assistant" && cleanText(msg.content || "")) {
+            var copy = create(box.ownerDocument, "button", "ari-qa-copy", "Copy");
+            copy.title = "Copy this answer";
+            copy.setAttribute("data-message-index", String(i));
+            copy.addEventListener("click", function (event) {
+              event.preventDefault();
+              event.stopPropagation();
+              var index = parseInt(event.currentTarget.getAttribute("data-message-index"), 10);
+              var message = ArxivDailyQA._thread && ArxivDailyQA._thread.messages ?
+                ArxivDailyQA._thread.messages[index] : null;
+              var ok = writeClipboardText(message && message.content || "");
+              event.currentTarget.textContent = ok ? "Copied" : "Copy failed";
+              var button = event.currentTarget;
+              try {
+                (box.ownerDocument.defaultView || mainWindow()).setTimeout(function () {
+                  if (button) button.textContent = "Copy";
+                }, 1200);
+              } catch (e) {}
+            });
+            tools.appendChild(copy);
+          }
+          if (msg.error && msg.retryText) {
+            var retry = create(box.ownerDocument, "button", "ari-qa-retry", "重试");
           retry.title = "用发送问题时的上下文快照重新请求";
           retry.setAttribute("data-message-index", String(i));
           retry.addEventListener("click", function (event) {
             var index = parseInt(event.currentTarget.getAttribute("data-message-index"), 10);
             ArxivDailyQA._retryMessage(index);
           });
-          tools.appendChild(retry);
+            tools.appendChild(retry);
+          }
           node.appendChild(tools);
         }
         box.appendChild(node);
