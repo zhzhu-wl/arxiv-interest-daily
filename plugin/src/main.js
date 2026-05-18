@@ -665,12 +665,6 @@
     manageProfile: function () {
       log("manageProfile");
       try {
-        if (!isReadyForConfiguredActions()) {
-          syncReadiness();
-          var notReadyWin = Zotero.getMainWindow();
-          if (notReadyWin) notReadyWin.alert(readinessReason());
-          return;
-        }
         var win = Zotero.getMainWindow();
         if (!win) return;
         if (typeof ArxivDailyProfileWindow !== "undefined") {
