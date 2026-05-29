@@ -894,6 +894,26 @@
     return /(\.\.\.|…)\s*$/.test(String(text || "").trim());
   }
 
+  function hasSubstantiveMetadata(paper) {
+    if (!paper) return false;
+    return !!(
+      String(paper.title || "").trim() ||
+      String(paper.abstract || "").trim() ||
+      String(paper.authors || "").trim()
+    );
+  }
+
+  function missingMetadataPapers(papers) {
+    var missing = [];
+    for (var i = 0; i < (papers || []).length; i++) {
+      if (!hasSubstantiveMetadata(papers[i])) {
+        var id = baseArxivId(papers[i] && papers[i].arxivId);
+        if (id) missing.push(id);
+      }
+    }
+    return missing;
+  }
+
   function cacheArxivMetadata(papers) {
     if (!papers || !papers.length || typeof ArxivDailyDataDir === "undefined") return;
     try {
@@ -901,19 +921,24 @@
       for (var i = 0; i < papers.length; i++) {
         var id = baseArxivId(papers[i].arxivId);
         if (!id) continue;
-        cache[id] = {
+        var existing = cache[id] || null;
+        if (!hasSubstantiveMetadata(papers[i])) {
+          if (!existing || !hasSubstantiveMetadata(existing)) delete cache[id];
+          continue;
+        }
+        cache[id] = Object.assign({}, existing || {}, {
           arxivId: id,
-          title: papers[i].title || "",
-          authors: papers[i].authors || "",
-          abstract: papers[i].abstract || "",
-          primaryCategory: papers[i].primaryCategory || "",
-          categories: papers[i].categories || "",
-          published: papers[i].published || "",
-          doi: papers[i].doi || "",
-          journalRef: papers[i].journalRef || "",
+          title: papers[i].title || (existing && existing.title) || "",
+          authors: papers[i].authors || (existing && existing.authors) || "",
+          abstract: papers[i].abstract || (existing && existing.abstract) || "",
+          primaryCategory: papers[i].primaryCategory || (existing && existing.primaryCategory) || "",
+          categories: papers[i].categories || (existing && existing.categories) || "",
+          published: papers[i].published || (existing && existing.published) || "",
+          doi: papers[i].doi || (existing && existing.doi) || "",
+          journalRef: papers[i].journalRef || (existing && existing.journalRef) || "",
           citationIdentifier: papers[i].citationIdentifier || papers[i].doi || ("arXiv:" + id),
           cachedAt: new Date().toISOString(),
-        };
+        });
       }
       ArxivDailyDataDir.writeJSON("cache/arxiv/metadata.json", cache);
     } catch (e) {
@@ -1104,6 +1129,14 @@
             var apiPapers = await ArxivDailyFetcher.fetchMetadata(ids, cancelToken, onProgress);
             allPapers = ArxivDailyFetcher.merge(allPapers, apiPapers);
             allPapers = dedupePapers(allPapers);
+            var missingMetadata = missingMetadataPapers(allPapers);
+            if (missingMetadata.length) {
+              reportMeta.missingMetadataCount = missingMetadata.length;
+              reportMeta.missingMetadataIds = missingMetadata.slice(0, 30);
+              reportMeta.missingMetadataWarning =
+                "有 " + missingMetadata.length + " 篇论文缺少标题、作者和摘要，可能是 arXiv API 临时失败或缓存污染。";
+              logError(reportMeta.missingMetadataWarning + " IDs: " + missingMetadata.slice(0, 20).join(", "));
+            }
             cacheArxivMetadata(allPapers);
             emitProgress(onProgress, "元数据补全完成: " + apiPapers.length + " 条 API 结果，合并后 " + allPapers.length + " 篇", 28);
           } catch (e) {
@@ -1609,7 +1642,12 @@
 
       lines.push("# " + dateLabel + " arXiv 兴趣报告");
       lines.push("");
-      lines.push("> 自动生成");
+      var reportNote = "自动生成";
+      if (meta && meta.missingMetadataCount) {
+        reportNote += "；信息提示：本报告有 " + meta.missingMetadataCount +
+          " 篇论文缺少标题、作者和摘要。若怀疑抓取或缓存异常，请在阅读器顶部清除论文缓存并重新生成。";
+      }
+      lines.push("> " + reportNote);
       lines.push("");
       lines.push("## 今日概览");
       lines.push("");
@@ -1629,6 +1667,7 @@
         if (meta.llmParseFailures) lines.push("- 筛选解析兜底: " + meta.llmParseFailures + " 个 LLM 批次仍不可解析，原始响应已保存到 cache/llm/raw-responses");
         if (meta.prefilterFallback) lines.push("- 预筛提示: LLM 预筛没有保留论文，已回退到全部候选进入正式评分");
         if (meta.selectionWarning) lines.push("- 筛选提示: " + meta.selectionWarning);
+        if (meta.missingMetadataWarning) lines.push("- 元数据提示: " + meta.missingMetadataWarning);
         if (meta.deepReadWarning) lines.push("- 导读提示: " + meta.deepReadWarning);
         if (meta.guessYouLikeWarning) lines.push("- 猜你喜欢提示: " + meta.guessYouLikeWarning);
       }
@@ -1797,7 +1836,8 @@
       var score = paper.selectionScore || paper.llmScore || 0;
       var scoreStr = score && !options.other ? " [评分: " + score + "/5]" : "";
       var headingLabel = options.headingLabel || (num + ".");
-      lines.push("### " + headingLabel + " " + paper.title + scoreStr);
+      var headingTitle = String(paper.title || "").trim() || ("arXiv " + (paper.arxivId || "") + "（信息缺失）");
+      lines.push("### " + headingLabel + " " + headingTitle + scoreStr);
       lines.push("");
       var authors = formatAuthors(paper);
       if (authors) lines.push("**作者**: " + authors);

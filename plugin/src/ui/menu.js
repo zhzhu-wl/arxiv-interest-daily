@@ -76,6 +76,14 @@
         { id: "menu-ari-calendar", labelKey: "menu.calendar", action: "openCalendar" },
         { separator: true },
         { id: "menu-ari-open-data-dir", labelKey: "menu.open_data_dir", labelFallback: "打开插件数据目录", action: "openProjectDirectory" },
+        {
+          id: "menu-ari-clear-paper-cache",
+          labelKey: "menu.clear_paper_cache",
+          labelFallback: "清除论文缓存",
+          tooltipKey: "menu.clear_paper_cache.tooltip",
+          tooltipFallback: "清除从 arXiv 抓取并用于生成报告的论文信息缓存",
+          action: "clearPaperCache"
+        },
         { id: "menu-ari-export-diagnostics", labelKey: "menu.export_diagnostics", labelFallback: "导出诊断日志", action: "exportDiagnostics" },
         { separator: true },
         { id: "menu-ari-show-report", labelKey: "menu.show.report", type: "checkbox", checked: true, action: "toggleReportPane" },
@@ -94,6 +102,9 @@
         const menuitem = createXUL(doc, "menuitem");
         menuitem.setAttribute("id", itemDef.id);
         menuitem.setAttribute("label", ArxivDailyI18n.t(itemDef.labelKey, itemDef.labelFallback || itemDef.labelKey));
+        if (itemDef.tooltipKey) {
+          menuitem.setAttribute("tooltiptext", ArxivDailyI18n.t(itemDef.tooltipKey, itemDef.tooltipFallback || itemDef.tooltipKey));
+        }
 
         if (itemDef.type === "checkbox") {
           menuitem.setAttribute("type", "checkbox");
@@ -172,6 +183,9 @@
       for (const item of this._menuItems) {
         if (item.def && item.def.labelKey) {
           item.el.setAttribute("label", ArxivDailyI18n.t(item.def.labelKey, item.def.labelFallback || item.def.labelKey));
+          if (item.def.tooltipKey) {
+            item.el.setAttribute("tooltiptext", ArxivDailyI18n.t(item.def.tooltipKey, item.def.tooltipFallback || item.def.tooltipKey));
+          }
         }
       }
       if (this._menu) {

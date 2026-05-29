@@ -149,6 +149,35 @@
       .trim();
   }
 
+  function stripDescriptor(text, label) {
+    var out = cleanText(text || "");
+    if (label) {
+      out = out.replace(new RegExp("^" + label + "\\s*:?\\s*", "i"), "");
+    }
+    return out.trim();
+  }
+
+  function extractClassBlock(html, className) {
+    var re = new RegExp(
+      "<div\\b[^>]*class\\s*=\\s*[\"'][^\"']*\\b" + className + "\\b[^\"']*[\"'][^>]*>([\\s\\S]*?)<\\/div>",
+      "i"
+    );
+    var match = String(html || "").match(re);
+    return match ? match[1] : "";
+  }
+
+  function extractClassField(html, className, label) {
+    var block = extractClassBlock(html, className);
+    if (!block) return "";
+    block = block.replace(/<span\b[^>]*class\s*=\s*["'][^"']*\bdescriptor\b[^"']*["'][^>]*>[\s\S]*?<\/span>/i, " ");
+    return stripDescriptor(block, label);
+  }
+
+  function extractFirstParagraph(html) {
+    var match = String(html || "").match(/<p\b[^>]*class\s*=\s*["'][^"']*\bmathjax\b[^"']*["'][^>]*>([\s\S]*?)<\/p>/i);
+    return match ? cleanText(match[1]) : "";
+  }
+
   function baseArxivId(value) {
     var id = safeDecodeURIComponent(String(value || "").trim());
     id = id.replace(/^arXiv:/i, "");
@@ -418,27 +447,59 @@
       if (!sectionIsIncluded(sectionKind)) continue;
 
       var announcementDate = headerDate || currentDate;
-      var absRegex = /href\s*=\s*["'](?:https?:\/\/arxiv\.org)?\/abs\/([^"'#?]+)(?:[?#][^"']*)?["']/gi;
       var seenInSection = {};
+      var entryRegex = /<dt\b[\s\S]*?href\s*=\s*["'](?:https?:\/\/arxiv\.org)?\/abs\/([^"'#?]+)(?:[?#][^"']*)?["'][\s\S]*?<\/dt>\s*<dd\b[^>]*>([\s\S]*?)<\/dd>/gi;
       var match;
 
-      while ((match = absRegex.exec(body)) !== null) {
+      while ((match = entryRegex.exec(body)) !== null) {
         var arxivId = baseArxivId(match[1]);
         if (!arxivId || seenInSection[arxivId]) continue;
         seenInSection[arxivId] = true;
 
+        var details = match[2] || "";
+        var title = extractClassField(details, "list-title", "Title");
+        var authors = extractClassField(details, "list-authors", "Authors");
+        var subjects = extractClassField(details, "list-subjects", "Subjects");
+        var abstract = extractFirstParagraph(details);
+        var primaryCategory = "";
+        var primaryMatch = details.match(/<span\b[^>]*class\s*=\s*["'][^"']*\bprimary-subject\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i);
+        if (primaryMatch) primaryCategory = cleanText(primaryMatch[1]);
+
         allPapers.push({
           arxivId: arxivId,
-          title: "",
-          authors: "",
-          abstract: "",
-          primaryCategory: "",
-          categories: "",
+          title: title,
+          authors: authors,
+          abstract: abstract,
+          primaryCategory: primaryCategory,
+          categories: subjects,
           announcementDate: announcementDate || "",
           announcementSection: sectionKind,
           sourceCategory: category,
+          citationIdentifier: "arXiv:" + arxivId,
           dateSource: "announcement",
         });
+      }
+
+      if (!Object.keys(seenInSection).length) {
+        var absRegex = /href\s*=\s*["'](?:https?:\/\/arxiv\.org)?\/abs\/([^"'#?]+)(?:[?#][^"']*)?["']/gi;
+        while ((match = absRegex.exec(body)) !== null) {
+          var fallbackId = baseArxivId(match[1]);
+          if (!fallbackId || seenInSection[fallbackId]) continue;
+          seenInSection[fallbackId] = true;
+          allPapers.push({
+            arxivId: fallbackId,
+            title: "",
+            authors: "",
+            abstract: "",
+            primaryCategory: "",
+            categories: "",
+            announcementDate: announcementDate || "",
+            announcementSection: sectionKind,
+            sourceCategory: category,
+            citationIdentifier: "arXiv:" + fallbackId,
+            dateSource: "announcement",
+          });
+        }
       }
     }
 
@@ -463,6 +524,12 @@
       var existing = seen[id];
       if (!existing.announcementDate && p.announcementDate) existing.announcementDate = p.announcementDate;
       if (!existing.announcementSection && p.announcementSection) existing.announcementSection = p.announcementSection;
+      if (!existing.title && p.title) existing.title = p.title;
+      if (!existing.abstract && p.abstract) existing.abstract = p.abstract;
+      if (!existing.authors && p.authors) existing.authors = p.authors;
+      if (!existing.primaryCategory && p.primaryCategory) existing.primaryCategory = p.primaryCategory;
+      if (!existing.categories && p.categories) existing.categories = p.categories;
+      if (!existing.citationIdentifier && p.citationIdentifier) existing.citationIdentifier = p.citationIdentifier;
       if (p.sourceCategory && (!existing.sourceCategory || existing.sourceCategory.indexOf(p.sourceCategory) < 0)) {
         existing.sourceCategory = existing.sourceCategory
           ? existing.sourceCategory + "; " + p.sourceCategory

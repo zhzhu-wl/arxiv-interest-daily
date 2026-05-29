@@ -139,8 +139,8 @@
       ".ari-row textarea{min-height:72px;resize:vertical;}",
       ".ari-checkbox{justify-self:start;width:auto!important;}",
       ".ari-hint{grid-column:2;color:GrayText;font-size:11px;margin-top:-4px;}",
-      ".ari-btn{min-width:82px;padding:6px 14px;font:13px message-box,system-ui,sans-serif;}",
-      ".ari-mini-btn{min-width:0;padding:4px 8px;font:12px message-box,system-ui,sans-serif;}",
+      ".ari-btn{min-width:82px;padding:6px 14px;font:13px message-box,system-ui,sans-serif;cursor:pointer;}",
+      ".ari-mini-btn{min-width:0;padding:4px 8px;font:12px message-box,system-ui,sans-serif;cursor:pointer;}",
       ".ari-inline-actions{display:flex;align-items:center;gap:8px;margin:8px 0 0 146px;flex-wrap:wrap;}",
       ".ari-results{margin:10px 0 0 146px;max-height:240px;overflow:auto;}",
       ".ari-result{border-radius:3px;margin:4px 0;padding:6px 8px;font-size:12px;}",
@@ -1128,6 +1128,29 @@
     }
   }
 
+  function clearPaperCache(doc, dialog) {
+    try {
+      if (!dialog.confirm(
+        "确定要清除 arXiv 论文缓存吗？\n\n这只会清除从 arXiv 抓取并用于生成报告的论文信息缓存；下次生成报告会重新抓取。"
+      )) {
+        return;
+      }
+      if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.clearPaperCache) {
+        if (ArxivDailyActions.clearPaperCache(null, null, { skipConfirm: true })) {
+          appendToolResult(doc, "arXiv 论文缓存已清除。下次生成报告会重新抓取论文信息。", true);
+        }
+        return;
+      }
+      if (typeof ArxivDailyCache === "undefined" || !ArxivDailyCache.clearArxivPaperCache) {
+        throw new Error("缓存模块不可用");
+      }
+      ArxivDailyCache.clearArxivPaperCache();
+      appendToolResult(doc, "arXiv 论文缓存已清除。下次生成报告会重新抓取论文信息。", true);
+    } catch (err) {
+      appendToolResult(doc, "清除 arXiv 论文缓存失败: " + (err.message || err), false);
+    }
+  }
+
   function buildWindow(dialog, args) {
     var doc = resetDocument(dialog);
     var cfg = args && args.config;
@@ -1392,9 +1415,16 @@
     exportLog.addEventListener("click", function () {
       exportDiagnostics(doc);
     });
+    var clearArxivCache = createEl(doc, "button", "ari-btn", "清除论文缓存");
+    clearArxivCache.type = "button";
+    clearArxivCache.title = "清除从 arXiv 抓取并用于生成报告的论文信息缓存";
+    clearArxivCache.addEventListener("click", function () {
+      clearPaperCache(doc, dialog);
+    });
     maintenanceActions.appendChild(exportSanitized);
     maintenanceActions.appendChild(exportFull);
     maintenanceActions.appendChild(exportLog);
+    maintenanceActions.appendChild(clearArxivCache);
     maintenance.body.appendChild(maintenanceActions);
     addField(doc, maintenance.body, "导入配置 JSON", makeTextarea(doc, "cfg-import-json", "粘贴 config-sanitized/full JSON 或原始 config.json"));
     var importActions = createEl(doc, "div", "ari-inline-actions");

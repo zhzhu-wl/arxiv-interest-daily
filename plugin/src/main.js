@@ -511,6 +511,40 @@
       }
     },
 
+    clearPaperCache: function (btn, id, options) {
+      options = options || {};
+      log("clearPaperCache");
+      try {
+        var win = Zotero.getMainWindow();
+        if (!options.skipConfirm && win && !win.confirm(
+          "确定要清除 arXiv 论文缓存吗？\n\n这只会清除从 arXiv 抓取并用于生成报告的论文信息缓存；下次生成报告会重新抓取。"
+        )) {
+          return false;
+        }
+        if (typeof ArxivDailyCache === "undefined" || !ArxivDailyCache.clearArxivPaperCache) {
+          throw new Error("缓存模块尚未加载");
+        }
+        ArxivDailyCache.clearArxivPaperCache();
+        if (options.regenerate) {
+          this.generateReport(null, null, {
+            skipChoice: true,
+            openAfterGenerate: true,
+            noLLM: !!options.noLLM,
+            modelRef: options.modelRef || "",
+            dateStr: options.dateStr || "",
+          });
+        } else if (win) {
+          win.alert("arXiv 论文缓存已清除。下次生成报告会重新抓取论文信息。");
+        }
+        return true;
+      } catch (err) {
+        logError("clearPaperCache failed: " + (err.message || err));
+        var alertWin = Zotero.getMainWindow();
+        if (alertWin) alertWin.alert("清除 arXiv 论文缓存失败:\n" + (err.message || err));
+        return false;
+      }
+    },
+
     configureInterests: function () {
       log("configureInterests");
       this.manageProfile(null, "configure");
@@ -565,7 +599,7 @@
 
         try {
           var reportModelRef = options.modelRef || (typeof ArxivDailyLLM !== "undefined" && ArxivDailyLLM.getUsageModelRef ? ArxivDailyLLM.getUsageModelRef("report") : "");
-          var result = await ArxivDailyReportGenerator.generate(null, wrappedToken, onProgress, {
+          var result = await ArxivDailyReportGenerator.generate(options.dateStr || null, wrappedToken, onProgress, {
             noLLM: !!options.noLLM ||
               (typeof ArxivDailyLLM !== "undefined" && ArxivDailyLLM.getUsageModelRef &&
                 ArxivDailyLLM.getUsageModelRef("report") === "__no_llm__"),

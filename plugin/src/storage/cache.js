@@ -92,6 +92,19 @@
       }
     },
 
+    clearArxivPaperCache: function () {
+      this.clear("arxiv");
+      try {
+        if (typeof ArxivDailyDataDir !== "undefined") {
+          ArxivDailyDataDir.deleteFile("cache/arxiv/metadata.json");
+          ArxivDailyDataDir.ensureSubDir("cache/arxiv");
+        }
+      } catch (e) {
+        logError("arXiv paper cache clear failed");
+      }
+      return true;
+    },
+
     setRaw: function (subDir, key, data, ext) {
       if (typeof ArxivDailyDataDir === "undefined") return false;
       var cacheKey = hash(key);

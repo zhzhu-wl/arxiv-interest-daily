@@ -549,6 +549,70 @@
     return report;
   }
 
+  function reportMissingInfoDetails(report, meta) {
+    var ids = [];
+    var count = 0;
+    var seen = {};
+    if (meta && parseInt(meta.missingMetadataCount, 10) > 0) {
+      count = parseInt(meta.missingMetadataCount, 10) || 0;
+      var metaIds = Array.isArray(meta.missingMetadataIds) ? meta.missingMetadataIds : [];
+      for (var m = 0; m < metaIds.length; m++) {
+        var metaId = baseArxivId(metaIds[m]);
+        if (metaId && !seen[metaId]) {
+          seen[metaId] = true;
+          ids.push(metaId);
+        }
+      }
+      return { count: count, ids: ids };
+    }
+    for (var s = 0; s < (report.sections || []).length; s++) {
+      var papers = report.sections[s].papers || [];
+      for (var p = 0; p < papers.length; p++) {
+        var paper = papers[p];
+        var title = cleanText(paper.title || paper.heading || "").trim();
+        var titleLooksMissing = !title || /信息缺失|metadata missing/i.test(title);
+        var hasAuthors = !!cleanText(paper.fields["作者"] || paper.fields["Authors"] || "").trim();
+        var hasSummary = !!cleanText(paper.fields["摘要"] || paper.fields["Abstract"] || "").trim() ||
+          !!(paper.abstract && paper.abstract.join("").trim());
+        if (!titleLooksMissing || hasAuthors || hasSummary) continue;
+        var arxiv = parseInlineLink(paper.fields.arXiv || "");
+        var id = baseArxivId(arxiv.label || arxiv.url);
+        if (id && !seen[id]) {
+          seen[id] = true;
+          ids.push(id);
+          count++;
+        } else if (!id) {
+          count++;
+        }
+      }
+    }
+    return { count: count, ids: ids };
+  }
+
+  function appendMissingMetadataBanner(doc, shell, details, dateForReport) {
+    if (!details || !details.count) return;
+    var banner = doc.createElement("div");
+    banner.style.cssText =
+      "border:1px solid #b7791f;border-left:4px solid #b7791f;border-radius:5px;" +
+      "background:rgba(183,121,31,.10);color:CanvasText;padding:9px 10px;margin:8px 0 14px;" +
+      "display:flex;align-items:center;gap:10px;flex-wrap:wrap;";
+    var text = doc.createElement("div");
+    var idText = details.ids && details.ids.length ? "（例如 " + details.ids.slice(0, 5).join(", ") + "）" : "";
+    setText(text, "检测到 " + details.count + " 篇论文缺少标题、作者和摘要" + idText + "。这通常是 arXiv 抓取或缓存异常导致的。");
+    text.style.cssText = "flex:1;min-width:240px;font-size:12px;line-height:1.45;";
+    banner.appendChild(text);
+    banner.appendChild(createButton(doc, "清除缓存并重新生成", "清除 arXiv 论文缓存，然后立刻重新生成报告", function () {
+      if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.clearPaperCache) {
+        ArxivDailyActions.clearPaperCache(null, null, {
+          skipConfirm: true,
+          regenerate: true,
+          dateStr: dateForReport || "",
+        });
+      }
+    }));
+    shell.appendChild(banner);
+  }
+
   function setText(el, text) {
     el.textContent = cleanText(text || "");
     return el;
@@ -2635,6 +2699,8 @@
         }));
       }
       shell.appendChild(actionRow);
+
+      appendMissingMetadataBanner(doc, shell, reportMissingInfoDetails(report, meta || {}), dateForReport);
 
       if (report.note) {
         var note = doc.createElement("div");
