@@ -25,6 +25,7 @@
     active: "research_interests.active.md",
     legacy: "research_interests.md",
   };
+  const FEEDBACK_PROFILE_DRAFT_PATH = "feedback/research_interests.feedback.draft.md";
 
   function isReadinessProfileFile(relativePath) {
     return relativePath === PROFILE_FILES.base ||
@@ -560,6 +561,40 @@
     updateStatus(doc, "已重新读取", "");
     updateProgress(doc, 0, "空闲");
     appendLog(doc, "Reloaded profile files.");
+  }
+
+  function maybeApplyFeedbackDraft(doc) {
+    var editor = doc.getElementById("profile-feedback");
+    if (!editor || safeText(editor.value).trim()) return false;
+    var draft = readFile(FEEDBACK_PROFILE_DRAFT_PATH).trim();
+    if (!draft) return false;
+    setValue(doc, "profile-feedback", draft + "\n");
+    updateCounts(doc);
+    markDirty(doc, true);
+    updateStatus(doc, "已填入猜你喜欢画像草稿，保存后才会生效", "ari-warning");
+    appendLog(doc, "Loaded pending feedback profile draft. Save it manually to enable the Guess You Like section.");
+    return true;
+  }
+
+  function focusProfileSection(doc, kind, options) {
+    options = options || {};
+    var targetId = kind === "feedback" ? "profile-feedback" :
+      (kind === "active" ? "profile-active" : "profile-base");
+    if (options.applyFeedbackDraft || kind === "feedback") {
+      maybeApplyFeedbackDraft(doc);
+    }
+    var editor = doc.getElementById(targetId);
+    if (!editor) return;
+    var panel = editor.closest ? editor.closest("[data-profile-panel]") : null;
+    try {
+      (panel || editor).scrollIntoView({ block: "center", behavior: "smooth" });
+    } catch (e) {
+      try { (panel || editor).scrollIntoView(true); } catch (ignore) {}
+    }
+    try {
+      editor.focus();
+      editor.setSelectionRange(0, 0);
+    } catch (e) {}
   }
 
   function itemToProfileText(item) {
@@ -1553,8 +1588,20 @@
       }
     });
 
+    dialog.ArxivDailyFocusProfileSection = function (kind, options) {
+      focusProfileSection(doc, kind || "base", options || {});
+    };
+
     setBuildButtonMode(doc, "llm-zotero");
     reloadProfiles(doc);
+    if (args && (args.applyFeedbackDraft || args.focus === "feedback")) {
+      maybeApplyFeedbackDraft(doc);
+    }
+    if (args && args.focus) {
+      dialog.setTimeout(function () {
+        focusProfileSection(doc, args.focus, args);
+      }, 0);
+    }
     appendLog(doc, args && args.mode === "configure"
       ? "Opened from Configure Research Interests entry."
       : "Opened from Research Interest Profile entry.");
@@ -1582,6 +1629,11 @@
     open: function (parentWin, args) {
       if (gWindow && !gWindow.closed) {
         gWindow.focus();
+        if (args && args.focus && typeof gWindow.ArxivDailyFocusProfileSection === "function") {
+          gWindow.setTimeout(function () {
+            gWindow.ArxivDailyFocusProfileSection(args.focus, args);
+          }, 0);
+        }
         return;
       }
 

@@ -14,6 +14,12 @@
   const MIN_DOCK_HEIGHT = 130;
   const MAX_DOCK_HEIGHT = 560;
   const DEFAULT_SPLIT_RATIO = 0.48;
+  const FEEDBACK_PROFILE_THRESHOLD = 5;
+  const FEEDBACK_PROFILE_DRAFT_PATH = "feedback/research_interests.feedback.draft.md";
+  const FEEDBACK_PROFILE_PATHS = [
+    "research_interests.feedback.md",
+    "feedback/research_interests.feedback.md",
+  ];
 
   function log(msg) {
     const text = "[" + LOG_PREFIX + "] " + msg;
@@ -751,6 +757,24 @@
     }
   }
 
+  function readText(relativePath) {
+    try {
+      if (typeof ArxivDailyDataDir !== "undefined") {
+        return String(ArxivDailyDataDir.readFile(relativePath) || "");
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  function writeText(relativePath, content) {
+    try {
+      return typeof ArxivDailyDataDir !== "undefined" &&
+        ArxivDailyDataDir.writeFile(relativePath, String(content || ""));
+    } catch (e) {
+      return false;
+    }
+  }
+
   function getTextNodes(root, includeExistingHighlights) {
     var nodes = [];
     if (!root || !root.ownerDocument) return nodes;
@@ -1038,6 +1062,116 @@
     return keys;
   }
 
+  function cleanDraftLine(value) {
+    return cleanText(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function feedbackEntriesFromIndex(index) {
+    var entries = [];
+    if (!index || typeof index !== "object") return entries;
+    Object.keys(index).forEach(function (key) {
+      if (!key || key.indexOf("__") === 0) return;
+      var entry = index[key];
+      if (!entry || !entry.rating) return;
+      entries.push({
+        key: key,
+        rating: String(entry.rating || ""),
+        label: feedbackLabel(entry.rating) || String(entry.rating || ""),
+        arxivId: baseArxivId(entry.arxivId || ""),
+        title: cleanDraftLine(entry.title || key),
+        reportDate: cleanDraftLine(entry.reportDate || ""),
+        updatedAt: cleanDraftLine(entry.updatedAt || ""),
+      });
+    });
+    entries.sort(function (a, b) {
+      return String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+    });
+    return entries;
+  }
+
+  function feedbackStatsFromIndex(index) {
+    var entries = feedbackEntriesFromIndex(index);
+    var stats = {
+      count: entries.length,
+      like: [],
+      neutral: [],
+      dislike: [],
+      entries: entries,
+    };
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].rating === "like") stats.like.push(entries[i]);
+      else if (entries[i].rating === "dislike") stats.dislike.push(entries[i]);
+      else stats.neutral.push(entries[i]);
+    }
+    return stats;
+  }
+
+  function hasSavedFeedbackProfile() {
+    for (var i = 0; i < FEEDBACK_PROFILE_PATHS.length; i++) {
+      if (readText(FEEDBACK_PROFILE_PATHS[i]).trim()) return true;
+    }
+    return false;
+  }
+
+  function appendFeedbackDraftGroup(lines, title, entries, emptyText) {
+    lines.push("## " + title);
+    lines.push("");
+    if (!entries.length) {
+      lines.push("- " + emptyText);
+      lines.push("");
+      return;
+    }
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      var parts = [];
+      if (entry.arxivId) parts.push("arXiv:" + entry.arxivId);
+      if (entry.reportDate) parts.push(entry.reportDate);
+      lines.push("- " + (entry.title || entry.key) + (parts.length ? " (" + parts.join(", ") + ")" : ""));
+    }
+    lines.push("");
+  }
+
+  function buildFeedbackProfileDraft(index) {
+    var stats = feedbackStatsFromIndex(index);
+    if (stats.count < FEEDBACK_PROFILE_THRESHOLD) return "";
+    var today = new Date().toISOString().slice(0, 10);
+    var lines = [
+      "# 猜你喜欢科研兴趣画像（待确认草稿）",
+      "",
+      "> " + today + " 根据 " + stats.count + " 篇唯一论文评价自动整理。请先人工检查、增删和改写；只有点击“保存猜你喜欢画像”后，才会写入 research_interests.feedback.md 并影响后续“猜你喜欢”区块。",
+      "",
+      "## 使用建议",
+      "",
+      "- 保留真正代表近期兴趣的正反馈主题、方法和物理问题。",
+      "- 将“不喜欢”部分改写为排除项或降权项，避免把偶然误点当成长期偏好。",
+      "- 如果这些反馈只是临时探索，请不要融合或覆盖基础科研兴趣画像。",
+      "",
+    ];
+    appendFeedbackDraftGroup(lines, "喜欢的论文信号", stats.like, "暂无喜欢反馈；可根据中性反馈补充近期探索方向。");
+    appendFeedbackDraftGroup(lines, "一般的论文信号", stats.neutral, "暂无一般反馈。");
+    appendFeedbackDraftGroup(lines, "不喜欢的论文信号", stats.dislike, "暂无不喜欢反馈。");
+    lines.push("## 可编辑偏好草稿");
+    lines.push("");
+    lines.push("- 优先推荐与“喜欢的论文信号”在核心问题、模型、方法或实验平台上相近的论文。");
+    lines.push("- 对只满足关键词但缺少机制关联、可验证预测或方法启发的论文降低优先级。");
+    lines.push("- 对“不喜欢的论文信号”中反复出现的主题或风格谨慎推荐，除非它们与基础画像有强交叉价值。");
+    lines.push("");
+    return lines.join("\n");
+  }
+
+  function ensureFeedbackProfileDraft(index) {
+    var stats = feedbackStatsFromIndex(index);
+    if (stats.count < FEEDBACK_PROFILE_THRESHOLD) {
+      return { ready: false, count: stats.count, hasProfile: hasSavedFeedbackProfile() };
+    }
+    var hasProfile = hasSavedFeedbackProfile();
+    if (!hasProfile) {
+      var draft = buildFeedbackProfileDraft(index);
+      if (draft) writeText(FEEDBACK_PROFILE_DRAFT_PATH, draft);
+    }
+    return { ready: true, count: stats.count, hasProfile: hasProfile };
+  }
+
   globalThis.ArxivDailyCenterWorkspace = {
     _win: null,
     _doc: null,
@@ -1051,6 +1185,7 @@
     _viewerOutlineResizer: null,
     _viewerBody: null,
     _feedbackStatus: null,
+    _feedbackProfileButton: null,
     _feedbackFlashTimer: null,
     _dock: null,
     _dockResize: null,
@@ -1961,6 +2096,20 @@
         ArxivDailyCenterWorkspace._submitTodayFeedback();
       });
 
+      var feedbackProfileButton = doc.createElement("button");
+      feedbackProfileButton.type = "button";
+      feedbackProfileButton.textContent = "配置猜你喜欢画像";
+      feedbackProfileButton.title = "累计评价达到 5 篇唯一论文后可用：打开猜你喜欢画像配置；自动草稿需手动保存后才会生效。";
+      feedbackProfileButton.style.cssText =
+        "display:none;height:24px;padding:0 8px;border:1px solid ThreeDShadow;background:ButtonFace;color:ButtonText;" +
+        "border-radius:3px;font:12px message-box,system-ui,sans-serif;cursor:pointer;white-space:nowrap;";
+      feedbackProfileButton.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        ArxivDailyCenterWorkspace._openFeedbackProfileConfig();
+      });
+      this._feedbackProfileButton = feedbackProfileButton;
+
       var revokeFeedback = createIconButton(doc, "↶", "撤回评价", function () {
         ArxivDailyCenterWorkspace._revokeTodayFeedback();
       });
@@ -1979,6 +2128,7 @@
       header.appendChild(this._viewerTitle);
       header.appendChild(feedbackStatus);
       header.appendChild(submitFeedback);
+      header.appendChild(feedbackProfileButton);
       header.appendChild(revokeFeedback);
       header.appendChild(fontSelect);
       header.appendChild(sizeInput);
@@ -2456,6 +2606,48 @@
       this._feedbackStatus.textContent = (stats.submitted ? "已提交" : "未提交") + " · 已评价 " + stats.rated + "/" + stats.total;
       this._feedbackStatus.title = "可重复提交今日评价；当前报告中已有 " + stats.rated + " 篇完成评价，共 " + stats.total + " 篇。" +
         (stats.submittedAt ? " 最近提交: " + stats.submittedAt : "");
+      this._updateFeedbackProfileButton();
+    },
+
+    _updateFeedbackProfileButton: function () {
+      if (!this._feedbackProfileButton) return;
+      var readiness = ensureFeedbackProfileDraft(this._loadFeedbackIndex());
+      if (!readiness.ready) {
+        this._feedbackProfileButton.style.display = "none";
+        this._feedbackProfileButton.title = "累计 " + readiness.count + "/" + FEEDBACK_PROFILE_THRESHOLD +
+          " 篇唯一论文评价后，可生成猜你喜欢画像草稿。";
+        return;
+      }
+      this._feedbackProfileButton.style.display = "";
+      if (readiness.hasProfile) {
+        this._feedbackProfileButton.title = "已累计 " + readiness.count +
+          " 篇唯一论文评价。打开猜你喜欢画像配置，可查看、修改或替换已保存的反馈画像。";
+      } else {
+        this._feedbackProfileButton.title = "已累计 " + readiness.count +
+          " 篇唯一论文评价，已自动准备猜你喜欢画像草稿。点击打开配置；草稿需手动保存后才会生效。";
+      }
+    },
+
+    _openFeedbackProfileConfig: function () {
+      ensureFeedbackProfileDraft(this._loadFeedbackIndex());
+      try {
+        var win = typeof Zotero !== "undefined" && Zotero.getMainWindow ? Zotero.getMainWindow() : this._win;
+        if (win && typeof ArxivDailyProfileWindow !== "undefined") {
+          ArxivDailyProfileWindow.open(win, {
+            mode: "feedback",
+            focus: "feedback",
+            applyFeedbackDraft: true,
+          });
+          return true;
+        }
+        if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.manageProfile) {
+          ArxivDailyActions.manageProfile(null, "feedback");
+          return true;
+        }
+      } catch (err) {
+        logError("open feedback profile config failed: " + (err.message || err));
+      }
+      return false;
     },
 
     _flashFeedbackStatus: function (message) {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.3 - 2026-06-11
+
+- Added feedback-profile readiness detection after 5 uniquely rated papers.
+- Added a report-reader shortcut to configure the Guess You Like research profile when feedback is sufficient.
+- Added pending feedback-profile draft generation from paper ratings; drafts prefill the feedback editor but are not saved until the user confirms.
+
 ## 1.1.2 - 2026-05-17
 
 - Reports now write complete abstracts instead of truncating them with trailing ellipses.
