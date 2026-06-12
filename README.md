@@ -25,7 +25,7 @@ This folder is the cross-platform XPI target. The older `zotero-arxiv-interest-d
 
 ## Installation
 
-1. Download `arxiv-interest-daily-v1.1.3.xpi` from the GitHub Release page.
+1. Download `arxiv-interest-daily-v1.1.4.xpi` from the GitHub Release page.
 2. Open Zotero.
 3. Go to `Tools -> Plugins`.
 4. Click the gear icon.
@@ -73,7 +73,7 @@ node scripts/build-xpi.js
 The generated XPI will be written to:
 
 ```text
-build/arxiv-interest-daily-v1.1.3.xpi
+build/arxiv-interest-daily-v1.1.4.xpi
 ```
 
 The build script creates ZIP/XPI entries with `/` separators and verifies that required files such as `manifest.json`, `bootstrap.js`, and `src/main.js` are present.
@@ -86,7 +86,7 @@ The build script creates ZIP/XPI entries with `/` separators and verifies that r
 https://raw.githubusercontent.com/zhzhu-wl/arxiv-interest-daily/main/updates.json
 ```
 
-`npm run build` regenerates `updates.json` for the current manifest version and XPI SHA-256. When publishing a new release, attach the generated XPI to the matching GitHub Release tag, for example `v1.1.3`.
+`npm run build` regenerates `updates.json` for the current manifest version and XPI SHA-256. When publishing a new release, attach the generated XPI to the matching GitHub Release tag, for example `v1.1.4`.
 
 ## Development Notes
 

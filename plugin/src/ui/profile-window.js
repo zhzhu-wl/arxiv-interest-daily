@@ -10,6 +10,7 @@
 
 (function () {
   const LOG_PREFIX = "arxiv-interest-daily";
+  const PREFS_PREFIX = "extensions.arxiv-interest-daily.";
   const WINDOW_NAME = "arxiv-daily-profile";
   const WINDOW_FEATURES = "chrome,centerscreen,resizable,width=980,height=820";
   const USER_LIBRARY_ID = 1;
@@ -26,6 +27,7 @@
     legacy: "research_interests.md",
   };
   const FEEDBACK_PROFILE_DRAFT_PATH = "feedback/research_interests.feedback.draft.md";
+  const FEEDBACK_PROFILE_MARKER = "<!-- arxiv-interest-daily:feedback-profile -->";
 
   function isReadinessProfileFile(relativePath) {
     return relativePath === PROFILE_FILES.base ||
@@ -74,8 +76,26 @@
     else log("ERROR: " + msg);
   }
 
+  function setPref(key, val) {
+    try {
+      Zotero.Prefs.set(PREFS_PREFIX + key, val);
+    } catch (e) {}
+  }
+
   function safeText(value) {
     return value === undefined || value === null ? "" : String(value);
+  }
+
+  function markFeedbackProfileText(text) {
+    var value = safeText(text).trim();
+    if (!value) return "";
+    if (value.indexOf(FEEDBACK_PROFILE_MARKER) < 0) value = FEEDBACK_PROFILE_MARKER + "\n" + value;
+    return value.replace(/\n{3,}/g, "\n\n") + "\n";
+  }
+
+  function setFeedbackAutoSaveEnabled(enabled) {
+    setPref("feedbackProfile.autoSaveEnabled", !!enabled);
+    if (enabled) setPref("feedbackProfile.autoSaveEnabledAt", new Date().toISOString());
   }
 
   function createEl(doc, name, className, text) {
@@ -475,7 +495,10 @@
 
   function saveAll(doc) {
     writeFile(PROFILE_FILES.base, getValue(doc, "profile-base"));
-    writeFile(PROFILE_FILES.feedback, getValue(doc, "profile-feedback"));
+    var feedbackText = markFeedbackProfileText(getValue(doc, "profile-feedback"));
+    writeFile(PROFILE_FILES.feedback, feedbackText);
+    setValue(doc, "profile-feedback", feedbackText);
+    setFeedbackAutoSaveEnabled(!!feedbackText.trim());
     writeFile(PROFILE_FILES.active, getValue(doc, "profile-active"));
     updateCounts(doc);
     markDirty(doc, false);
@@ -491,7 +514,12 @@
     };
     var spec = map[kind];
     if (!spec) return;
-    writeFile(spec[1], getValue(doc, spec[0]));
+    var value = kind === "feedback" ? markFeedbackProfileText(getValue(doc, spec[0])) : getValue(doc, spec[0]);
+    writeFile(spec[1], value);
+    if (kind === "feedback") {
+      setValue(doc, spec[0], value);
+      setFeedbackAutoSaveEnabled(!!value.trim());
+    }
     updateCounts(doc);
     updateStatus(doc, "已保存 " + spec[2], "ari-ok");
     markDirty(doc, false);
@@ -571,8 +599,8 @@
     setValue(doc, "profile-feedback", draft + "\n");
     updateCounts(doc);
     markDirty(doc, true);
-    updateStatus(doc, "已填入猜你喜欢画像草稿，保存后才会生效", "ari-warning");
-    appendLog(doc, "Loaded pending feedback profile draft. Save it manually to enable the Guess You Like section.");
+    updateStatus(doc, "已填入猜你喜欢画像草稿；首次保存后，后续评价会自动更新正式画像", "ari-warning");
+    appendLog(doc, "Loaded pending feedback profile draft. First save enables automatic feedback-profile updates.");
     return true;
   }
 

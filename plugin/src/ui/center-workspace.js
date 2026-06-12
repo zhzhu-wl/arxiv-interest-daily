@@ -15,7 +15,9 @@
   const MAX_DOCK_HEIGHT = 560;
   const DEFAULT_SPLIT_RATIO = 0.48;
   const FEEDBACK_PROFILE_THRESHOLD = 5;
+  const FEEDBACK_PROFILE_MARKER = "<!-- arxiv-interest-daily:feedback-profile -->";
   const FEEDBACK_PROFILE_DRAFT_PATH = "feedback/research_interests.feedback.draft.md";
+  const FEEDBACK_PROFILE_RECORD_PATH = "feedback/research_interests.feedback.records.md";
   const FEEDBACK_PROFILE_PATHS = [
     "research_interests.feedback.md",
     "feedback/research_interests.feedback.md",
@@ -78,6 +80,13 @@
       .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "")
       .replace(/[\uD800-\uDFFF]/g, "\uFFFD")
       .replace(/\r\n?/g, "\n");
+  }
+
+  function truncateText(text, maxChars) {
+    var value = cleanText(text || "").replace(/[ \t]+\n/g, "\n").trim();
+    var max = parseInt(maxChars, 10) || 0;
+    if (!max || value.length <= max) return value;
+    return value.slice(0, Math.max(0, max - 20)).trim() + "\n...[truncated]";
   }
 
   function safeTitle(text, fallback) {
@@ -389,6 +398,29 @@
     ]);
   }
 
+  function looksLikeGeneratedGuideText(text) {
+    var value = cleanText(text || "").replace(/\s+/g, " ").trim();
+    if (!value) return false;
+    if (/^(这篇论文|本文|这项工作|这个工作|作者|论文的逻辑|论文的论证|核心画面|核心逻辑|这里的关键|关键推进是|他们发现|它们发现|如果我们|反过来说|总的来说|换句话说)/.test(value) && value.length > 45) {
+      return true;
+    }
+    if (/(\*\*[^*]+\*\*)/.test(value) && /(这篇论文|核心|作者|CFT|哈密顿量|谱|波函数|导读|论证链)/.test(value) && value.length > 60) {
+      return true;
+    }
+    return false;
+  }
+
+  function shouldRenderSectionIntro(text, sectionTitle) {
+    var value = cleanText(text || "").replace(/\s+/g, " ").trim();
+    if (!value) return false;
+    if (looksLikeGeneratedGuideText(value)) return false;
+    if (value.length > 180 && !/^(以下|这些|下面|今天|暂无|无|This section|The following)/.test(value)) {
+      return false;
+    }
+    if (!sectionTitle && value.length > 80) return false;
+    return true;
+  }
+
   function scoreStars(score) {
     var n = parseInt(score, 10);
     if (!Number.isFinite(n) || n <= 0) return "";
@@ -470,6 +502,9 @@
       var line = raw.trim();
       if (!line) continue;
       if (/^\s*---+\s*$/.test(line)) {
+        if (paper && activeField && /^(长导读|交叉导读|摘要|猜你喜欢理由|推荐理由)$/i.test(activeField)) {
+          continue;
+        }
         finishPaper();
         continue;
       }
@@ -508,7 +543,10 @@
               paper.abstract.push(nested);
             }
           } else {
-            ensureSection().intro.push(normalizeNestedPaperLine(line));
+            var introHeading = normalizeNestedPaperLine(line);
+            if (shouldRenderSectionIntro(introHeading, section && section.title)) {
+              ensureSection().intro.push(introHeading);
+            }
           }
           continue;
         }
@@ -549,7 +587,9 @@
           paper.abstract.push(normalizeNestedPaperLine(line));
         }
       } else {
-        ensureSection().intro.push(line);
+        if (shouldRenderSectionIntro(line, section && section.title)) {
+          ensureSection().intro.push(line);
+        }
       }
     }
     return report;
@@ -1079,6 +1119,17 @@
         label: feedbackLabel(entry.rating) || String(entry.rating || ""),
         arxivId: baseArxivId(entry.arxivId || ""),
         title: cleanDraftLine(entry.title || key),
+        authors: cleanDraftLine(entry.authors || ""),
+        categories: cleanDraftLine(entry.categories || entry.primaryCategory || ""),
+        sectionTitle: cleanDraftLine(entry.sectionTitle || entry.reportSection || ""),
+        score: cleanDraftLine(entry.score || ""),
+        tags: Array.isArray(entry.tags) ? entry.tags.slice(0, 12).map(cleanDraftLine).filter(Boolean) : [],
+        abstract: truncateText(entry.abstract || "", 1800),
+        recommendation: truncateText(entry.recommendation || entry.reason || "", 1200),
+        guessReason: truncateText(entry.guessReason || "", 900),
+        readingGuide: truncateText(entry.readingGuide || "", 1600),
+        crossGuide: truncateText(entry.crossGuide || "", 1600),
+        fullText: truncateText(entry.fullText || "", 2500),
         reportDate: cleanDraftLine(entry.reportDate || ""),
         updatedAt: cleanDraftLine(entry.updatedAt || ""),
       });
@@ -1106,14 +1157,78 @@
     return stats;
   }
 
+  function isFeedbackRecordLike(text) {
+    var value = cleanText(text || "");
+    if (!value.trim()) return false;
+    if (/猜你喜欢科研兴趣画像（待确认草稿）|喜欢的论文信号|一般的论文信号|不喜欢的论文信号|可编辑偏好草稿/.test(value)) return true;
+    if (/猜你喜欢反馈记录|Feedback record/i.test(value) && /##\s*(喜欢|一般|不喜欢)/.test(value)) return true;
+    return false;
+  }
+
+  function isUsableFeedbackProfile(text) {
+    var value = cleanText(text || "").trim();
+    if (!value) return false;
+    if (value.indexOf(FEEDBACK_PROFILE_MARKER) >= 0) return !isFeedbackRecordLike(value);
+    if (isFeedbackRecordLike(value)) return false;
+    if (looksLikeGeneratedGuideText(value) && !/(偏好|画像|兴趣|推荐|降权|排除|喜欢|不喜欢|主题|方法|平台)/.test(value)) return false;
+    if (!/(偏好|画像|兴趣|推荐|降权|排除|喜欢|不喜欢|主题|方法|平台|observable|method|platform|preference|deprioritize)/i.test(value)) return false;
+    return true;
+  }
+
   function hasSavedFeedbackProfile() {
     for (var i = 0; i < FEEDBACK_PROFILE_PATHS.length; i++) {
-      if (readText(FEEDBACK_PROFILE_PATHS[i]).trim()) return true;
+      if (isUsableFeedbackProfile(readText(FEEDBACK_PROFILE_PATHS[i]))) return true;
     }
     return false;
   }
 
-  function appendFeedbackDraftGroup(lines, title, entries, emptyText) {
+  function firstSavedFeedbackProfile() {
+    for (var i = 0; i < FEEDBACK_PROFILE_PATHS.length; i++) {
+      var text = readText(FEEDBACK_PROFILE_PATHS[i]);
+      if (isUsableFeedbackProfile(text)) return text;
+    }
+    return "";
+  }
+
+  function feedbackProfileAutoSaveEnabled() {
+    return getPref("feedbackProfile.autoSaveEnabled", false) === true || hasSavedFeedbackProfile();
+  }
+
+  function setFeedbackProfileAutoSaveEnabled(enabled) {
+    setPref("feedbackProfile.autoSaveEnabled", !!enabled);
+    if (enabled) setPref("feedbackProfile.autoSaveEnabledAt", new Date().toISOString());
+  }
+
+  function markFeedbackProfile(text) {
+    var value = cleanText(text || "").trim();
+    if (!value) return "";
+    if (value.indexOf(FEEDBACK_PROFILE_MARKER) < 0) value = FEEDBACK_PROFILE_MARKER + "\n" + value;
+    return value.replace(/\n{3,}/g, "\n\n") + "\n";
+  }
+
+  function normalizeFeedbackProfile(text, stats, mode) {
+    var value = cleanText(text || "").trim()
+      .replace(/^```(?:markdown|md)?\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+    if (!/^#\s+/.test(value)) {
+      value = "# 猜你喜欢科研兴趣画像" + (mode === "draft" ? "（LLM 合成草稿）" : "") + "\n\n" + value;
+    }
+    var meta = "> " + new Date().toISOString().slice(0, 10) +
+      " 由 LLM 根据 " + ((stats && stats.count) || 0) +
+      " 篇唯一论文评价及本地可用摘要/导读/原文缓存合成；反馈记录另存为 `" +
+      FEEDBACK_PROFILE_RECORD_PATH + "`。";
+    var lines = value.split("\n");
+    if (lines.length && lines[0].indexOf("（待确认草稿）") >= 0) {
+      lines[0] = lines[0].replace("（待确认草稿）", mode === "draft" ? "（LLM 合成草稿）" : "");
+    }
+    if (lines.length < 3 || !/^>\s*/.test(lines[2] || "")) {
+      lines.splice(1, 0, "", meta);
+    }
+    return markFeedbackProfile(lines.join("\n"));
+  }
+
+  function appendFeedbackRecordGroup(lines, title, entries, emptyText) {
     lines.push("## " + title);
     lines.push("");
     if (!entries.length) {
@@ -1127,49 +1242,231 @@
       if (entry.arxivId) parts.push("arXiv:" + entry.arxivId);
       if (entry.reportDate) parts.push(entry.reportDate);
       lines.push("- " + (entry.title || entry.key) + (parts.length ? " (" + parts.join(", ") + ")" : ""));
+      if (entry.categories) lines.push("  - 分类: " + entry.categories);
+      if (entry.tags && entry.tags.length) lines.push("  - 标签: " + entry.tags.join(", "));
+      if (entry.recommendation) lines.push("  - 推荐理由: " + truncateText(entry.recommendation, 500).replace(/\n+/g, " "));
+      if (entry.guessReason) lines.push("  - 猜你喜欢理由: " + truncateText(entry.guessReason, 400).replace(/\n+/g, " "));
+      if (entry.abstract) lines.push("  - 摘要: " + truncateText(entry.abstract, 700).replace(/\n+/g, " "));
+      if (entry.readingGuide) lines.push("  - 长导读摘录: " + truncateText(entry.readingGuide, 700).replace(/\n+/g, " "));
+      if (entry.crossGuide) lines.push("  - 交叉导读摘录: " + truncateText(entry.crossGuide, 700).replace(/\n+/g, " "));
     }
     lines.push("");
   }
 
-  function buildFeedbackProfileDraft(index) {
+  function buildFeedbackRecordMarkdown(index) {
     var stats = feedbackStatsFromIndex(index);
     if (stats.count < FEEDBACK_PROFILE_THRESHOLD) return "";
     var today = new Date().toISOString().slice(0, 10);
     var lines = [
-      "# 猜你喜欢科研兴趣画像（待确认草稿）",
+      "# 猜你喜欢反馈记录",
       "",
-      "> " + today + " 根据 " + stats.count + " 篇唯一论文评价自动整理。请先人工检查、增删和改写；只有点击“保存猜你喜欢画像”后，才会写入 research_interests.feedback.md 并影响后续“猜你喜欢”区块。",
+      "> " + today + " 根据 " + stats.count + " 篇唯一论文评价自动整理。本文件是训练记录，不是猜你喜欢画像；正式画像由 LLM 合成后写入 research_interests.feedback.md 或待确认草稿。",
       "",
-      "## 使用建议",
+      "## 记录说明",
       "",
-      "- 保留真正代表近期兴趣的正反馈主题、方法和物理问题。",
-      "- 将“不喜欢”部分改写为排除项或降权项，避免把偶然误点当成长期偏好。",
-      "- 如果这些反馈只是临时探索，请不要融合或覆盖基础科研兴趣画像。",
+      "- 这里保留评价过的论文信号，供追溯和重新合成画像。",
+      "- 不应把本文件直接当作 research_interests.feedback.md 使用。",
+      "- LLM 合成画像时会读取这些标题、摘要、推荐理由、导读和本地可用原文缓存。",
       "",
     ];
-    appendFeedbackDraftGroup(lines, "喜欢的论文信号", stats.like, "暂无喜欢反馈；可根据中性反馈补充近期探索方向。");
-    appendFeedbackDraftGroup(lines, "一般的论文信号", stats.neutral, "暂无一般反馈。");
-    appendFeedbackDraftGroup(lines, "不喜欢的论文信号", stats.dislike, "暂无不喜欢反馈。");
-    lines.push("## 可编辑偏好草稿");
-    lines.push("");
-    lines.push("- 优先推荐与“喜欢的论文信号”在核心问题、模型、方法或实验平台上相近的论文。");
-    lines.push("- 对只满足关键词但缺少机制关联、可验证预测或方法启发的论文降低优先级。");
-    lines.push("- 对“不喜欢的论文信号”中反复出现的主题或风格谨慎推荐，除非它们与基础画像有强交叉价值。");
-    lines.push("");
+    appendFeedbackRecordGroup(lines, "喜欢", stats.like, "暂无喜欢反馈；可根据中性反馈补充近期探索方向。");
+    appendFeedbackRecordGroup(lines, "一般", stats.neutral, "暂无一般反馈。");
+    appendFeedbackRecordGroup(lines, "不喜欢", stats.dislike, "暂无不喜欢反馈。");
     return lines.join("\n");
+  }
+
+  function buildNoLlmFeedbackProfileNotice(index) {
+    var stats = feedbackStatsFromIndex(index);
+    if (stats.count < FEEDBACK_PROFILE_THRESHOLD) return "";
+    return [
+      "# 猜你喜欢科研兴趣画像（等待 LLM 合成）",
+      "",
+      "> 已累计 " + stats.count + " 篇唯一论文评价，但当前没有可用 LLM 配置，因此尚未合成真正的偏好画像。反馈记录已保存到 `" + FEEDBACK_PROFILE_RECORD_PATH + "`。",
+      "",
+      "## 下一步",
+      "",
+      "- 配置 LLM 后，重新打开报告或继续评价论文会自动合成画像草稿。",
+      "- 首次手动保存猜你喜欢画像后，后续评价会自动更新并保存正式画像。",
+      "",
+    ].join("\n");
+  }
+
+  function feedbackEntryEvidenceText(entry) {
+    var lines = [
+      "rating: " + (entry.label || entry.rating || ""),
+      "title: " + (entry.title || entry.key || ""),
+      "arxiv_id: " + (entry.arxivId || ""),
+    ];
+    if (entry.reportDate) lines.push("report_date: " + entry.reportDate);
+    if (entry.sectionTitle) lines.push("report_section: " + entry.sectionTitle);
+    if (entry.score) lines.push("report_score: " + entry.score);
+    if (entry.authors) lines.push("authors: " + entry.authors);
+    if (entry.categories) lines.push("categories: " + entry.categories);
+    if (entry.tags && entry.tags.length) lines.push("tags: " + entry.tags.join(", "));
+    if (entry.recommendation) lines.push("recommendation_reason:\n" + truncateText(entry.recommendation, 1000));
+    if (entry.guessReason) lines.push("guess_you_like_reason:\n" + truncateText(entry.guessReason, 800));
+    if (entry.abstract) lines.push("abstract:\n" + truncateText(entry.abstract, 1400));
+    if (entry.readingGuide) lines.push("reading_guide:\n" + truncateText(entry.readingGuide, 1400));
+    if (entry.crossGuide) lines.push("cross_guide:\n" + truncateText(entry.crossGuide, 1400));
+    if (entry.fullText) lines.push("local_full_text_or_cache_excerpt:\n" + truncateText(entry.fullText, 2200));
+    return lines.join("\n");
+  }
+
+  function buildFeedbackProfilePrompt(stats, previousProfile) {
+    var entries = (stats.entries || []).slice(0, 80);
+    var grouped = { like: [], neutral: [], dislike: [] };
+    for (var i = 0; i < entries.length; i++) {
+      var bucket = entries[i].rating === "like" ? "like" : (entries[i].rating === "dislike" ? "dislike" : "neutral");
+      grouped[bucket].push(feedbackEntryEvidenceText(entries[i]));
+    }
+    return [
+      "You are synthesizing a durable 'Guess You Like' research-interest profile from explicit user paper ratings.",
+      "The output must be a preference profile, not a log of rated papers.",
+      "",
+      "Use the rated papers' titles, abstracts, report reasons, reading guides, and local full-text excerpts when present.",
+      "Infer recurring interests, mechanisms, methods, platforms, observables, and exclusion/downweight signals.",
+      "Separate derived preferences from uncertain conjectures. Do not overfit one accidental click.",
+      "",
+      "Write in Simplified Chinese as Markdown. Required sections:",
+      "1. 近期强正反馈偏好",
+      "2. 方法与证据风格偏好",
+      "3. 实验/模型/材料平台偏好",
+      "4. 探索性但可推荐的相邻方向",
+      "5. 降权或排除信号",
+      "6. 给猜你喜欢排序器的判据",
+      "",
+      "Do not list every paper. Mention examples only when they clarify a theme.",
+      "Do not include the raw feedback record headings like '喜欢的论文信号'.",
+      "",
+      "Previous saved feedback profile, if any:",
+      previousProfile || "(none)",
+      "",
+      "Positive ratings:",
+      grouped.like.join("\n\n---\n\n") || "(none)",
+      "",
+      "Neutral ratings:",
+      grouped.neutral.join("\n\n---\n\n") || "(none)",
+      "",
+      "Negative ratings:",
+      grouped.dislike.join("\n\n---\n\n") || "(none)",
+    ].join("\n");
+  }
+
+  async function getItemAsync(itemID) {
+    if (!itemID || typeof Zotero === "undefined" || !Zotero.Items) return null;
+    try {
+      return Zotero.Items.getAsync ? await Zotero.Items.getAsync(itemID) : Zotero.Items.get(itemID);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function readAttachmentCacheText(attachment, maxChars) {
+    if (!attachment || typeof Zotero === "undefined" || !Zotero.Fulltext || !Zotero.File) return "";
+    try {
+      var cacheFile = Zotero.Fulltext.getItemCacheFile(attachment);
+      if (!cacheFile || !cacheFile.exists || !cacheFile.exists()) return "";
+      if (Zotero.File.getContentsAsync) {
+        return await Zotero.File.getContentsAsync(cacheFile, "utf-8", maxChars || 50000);
+      }
+      if (Zotero.File.getContents) return Zotero.File.getContents(cacheFile).slice(0, maxChars || 50000);
+    } catch (e) {}
+    return "";
+  }
+
+  async function readProjectEntryFullText(entry, maxChars) {
+    if (!entry) return "";
+    var ids = [];
+    function pushId(value) {
+      var n = parseInt(value || 0, 10);
+      if (n && ids.indexOf(n) < 0) ids.push(n);
+    }
+    pushId(entry.pdfAttachmentID);
+    pushId(entry.attachmentID);
+    pushId(entry.zoteroItemID || entry.itemID || entry.zoteroItemId);
+    for (var i = 0; i < ids.length; i++) {
+      var item = await getItemAsync(ids[i]);
+      if (!item) continue;
+      try {
+        if (item.isAttachment && item.isAttachment()) {
+          var text = await readAttachmentCacheText(item, maxChars);
+          if (text) return truncateText(text, maxChars);
+        }
+        var attachmentIDs = item.getAttachments ? item.getAttachments() : [];
+        for (var a = 0; attachmentIDs && a < attachmentIDs.length; a++) {
+          var attachment = await getItemAsync(attachmentIDs[a]);
+          var attText = await readAttachmentCacheText(attachment, maxChars);
+          if (attText) return truncateText(attText, maxChars);
+        }
+      } catch (e) {}
+    }
+    return "";
+  }
+
+  async function enrichFeedbackStatsWithLocalText(stats) {
+    if (!stats || !stats.entries || !stats.entries.length) return stats;
+    var projectIndex = readJSON("project-papers/index.json", []);
+    if (!Array.isArray(projectIndex) || !projectIndex.length) return stats;
+    var byId = {};
+    for (var i = 0; i < projectIndex.length; i++) {
+      var id = baseArxivId(projectIndex[i] && (projectIndex[i].arxivId || projectIndex[i].id || projectIndex[i].paperId));
+      if (id && !byId[id]) byId[id] = projectIndex[i];
+    }
+    var fullTextReads = 0;
+    for (var e = 0; e < stats.entries.length; e++) {
+      var entry = stats.entries[e];
+      var project = byId[baseArxivId(entry.arxivId)];
+      if (!project) continue;
+      entry.authors = entry.authors || cleanDraftLine(project.authors || "");
+      entry.categories = entry.categories || cleanDraftLine(project.primaryCategory || project.categories || "");
+      entry.abstract = entry.abstract || truncateText(project.abstract || "", 1800);
+      entry.recommendation = entry.recommendation || truncateText(project.recommendation || "", 1200);
+      if (!entry.fullText && fullTextReads < 8) {
+        entry.fullText = await readProjectEntryFullText(project, 2500);
+        if (entry.fullText) fullTextReads++;
+      }
+    }
+    return stats;
+  }
+
+  async function synthesizeFeedbackProfile(index, mode) {
+    var stats = feedbackStatsFromIndex(index);
+    await enrichFeedbackStatsWithLocalText(stats);
+    if (stats.count < FEEDBACK_PROFILE_THRESHOLD) return "";
+    if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured({ kind: "report" })) {
+      return "";
+    }
+    var response = await ArxivDailyLLM.complete(
+      "You synthesize research preference profiles from explicit paper feedback. Return Markdown only.",
+      buildFeedbackProfilePrompt(stats, firstSavedFeedbackProfile()),
+      null,
+      { kind: "report", maxTokens: 5000, temperature: 0.2 }
+    );
+    return normalizeFeedbackProfile(response, stats, mode || "draft");
+  }
+
+  function writeFeedbackRecord(index) {
+    var record = buildFeedbackRecordMarkdown(index);
+    if (record) writeText(FEEDBACK_PROFILE_RECORD_PATH, record);
+    return record;
+  }
+
+  function buildFeedbackProfileDraft(index) {
+    return buildNoLlmFeedbackProfileNotice(index);
   }
 
   function ensureFeedbackProfileDraft(index) {
     var stats = feedbackStatsFromIndex(index);
     if (stats.count < FEEDBACK_PROFILE_THRESHOLD) {
-      return { ready: false, count: stats.count, hasProfile: hasSavedFeedbackProfile() };
+      return { ready: false, count: stats.count, hasProfile: hasSavedFeedbackProfile(), autoSave: feedbackProfileAutoSaveEnabled() };
     }
+    writeFeedbackRecord(index);
     var hasProfile = hasSavedFeedbackProfile();
-    if (!hasProfile) {
+    if (!hasProfile && !readText(FEEDBACK_PROFILE_DRAFT_PATH).trim()) {
       var draft = buildFeedbackProfileDraft(index);
       if (draft) writeText(FEEDBACK_PROFILE_DRAFT_PATH, draft);
     }
-    return { ready: true, count: stats.count, hasProfile: hasProfile };
+    return { ready: true, count: stats.count, hasProfile: hasProfile, autoSave: feedbackProfileAutoSaveEnabled() };
   }
 
   globalThis.ArxivDailyCenterWorkspace = {
@@ -1187,6 +1484,8 @@
     _feedbackStatus: null,
     _feedbackProfileButton: null,
     _feedbackFlashTimer: null,
+    _feedbackProfileUpdateTimer: null,
+    _feedbackProfileUpdatePromise: null,
     _dock: null,
     _dockResize: null,
     _splitter: null,
@@ -2555,6 +2854,66 @@
       return saveJSON("feedback/paper_feedback.json", this._feedbackIndex);
     },
 
+    _scheduleFeedbackProfileUpdate: function (reason, immediate) {
+      var index = this._loadFeedbackIndex();
+      var readiness = ensureFeedbackProfileDraft(index);
+      if (!readiness.ready) return false;
+      var win = this._win || (typeof Zotero !== "undefined" && Zotero.getMainWindow ? Zotero.getMainWindow() : null);
+      var delay = immediate ? 0 : 900;
+      if (this._feedbackProfileUpdateTimer && win && win.clearTimeout) {
+        win.clearTimeout(this._feedbackProfileUpdateTimer);
+      } else if (this._feedbackProfileUpdateTimer) {
+        clearTimeout(this._feedbackProfileUpdateTimer);
+      }
+      var self = this;
+      var run = function () {
+        self._feedbackProfileUpdateTimer = null;
+        self._refreshFeedbackProfileFromRatings(reason || "feedback-change").catch(function (err) {
+          logError("feedback profile update failed: " + (err.message || err));
+        });
+      };
+      this._feedbackProfileUpdateTimer = win && win.setTimeout ? win.setTimeout(run, delay) : setTimeout(run, delay);
+      return true;
+    },
+
+    _refreshFeedbackProfileFromRatings: async function (reason) {
+      if (this._feedbackProfileUpdatePromise) return this._feedbackProfileUpdatePromise;
+      var self = this;
+      this._feedbackProfileUpdatePromise = (async function () {
+        var index = self._loadFeedbackIndex();
+        var readiness = ensureFeedbackProfileDraft(index);
+        if (!readiness.ready) return false;
+        var autoSave = feedbackProfileAutoSaveEnabled();
+        if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured({ kind: "report" })) {
+          if (!autoSave && !hasSavedFeedbackProfile()) {
+            var notice = buildFeedbackProfileDraft(index);
+            if (notice) writeText(FEEDBACK_PROFILE_DRAFT_PATH, notice);
+          }
+          self._updateFeedbackProfileButton();
+          return false;
+        }
+        var profile = await synthesizeFeedbackProfile(index, autoSave ? "auto" : "draft");
+        if (!profile) return false;
+        if (autoSave) {
+          writeText("research_interests.feedback.md", profile);
+          writeText(FEEDBACK_PROFILE_DRAFT_PATH, "");
+          setFeedbackProfileAutoSaveEnabled(true);
+          self._flashFeedbackStatus("猜你喜欢画像已自动更新");
+        } else {
+          writeText(FEEDBACK_PROFILE_DRAFT_PATH, profile);
+          self._flashFeedbackStatus("已生成猜你喜欢画像草稿");
+        }
+        log("Feedback profile refreshed from ratings: " + (reason || ""));
+        self._updateFeedbackProfileButton();
+        return true;
+      })();
+      try {
+        return await this._feedbackProfileUpdatePromise;
+      } finally {
+        this._feedbackProfileUpdatePromise = null;
+      }
+    },
+
     _getPaperFeedback: function (paperKey) {
       if (!paperKey) return "";
       var index = this._loadFeedbackIndex();
@@ -2580,11 +2939,23 @@
           label: feedbackLabel(rating),
           arxivId: paper && paper.arxivId ? paper.arxivId : "",
           title: paper && paper.title ? paper.title : "",
+          authors: paper && paper.authors ? paper.authors : "",
+          categories: paper && paper.categories ? paper.categories : "",
+          sectionTitle: paper && paper.sectionTitle ? paper.sectionTitle : "",
+          score: paper && paper.score ? paper.score : "",
+          tags: paper && paper.tags ? paper.tags : [],
+          abstract: paper && paper.abstract ? paper.abstract : "",
+          recommendation: paper && paper.recommendation ? paper.recommendation : "",
+          guessReason: paper && paper.guessReason ? paper.guessReason : "",
+          readingGuide: paper && paper.readingGuide ? paper.readingGuide : "",
+          crossGuide: paper && paper.crossGuide ? paper.crossGuide : "",
           reportDate: meta && meta.date ? meta.date : "",
           updatedAt: new Date().toISOString(),
         };
       }
-      return this._saveFeedbackIndex();
+      var saved = this._saveFeedbackIndex();
+      if (saved) this._scheduleFeedbackProfileUpdate("paper-rating", false);
+      return saved;
     },
 
     _feedbackStatsForCurrentReport: function () {
@@ -2621,29 +2992,53 @@
       this._feedbackProfileButton.style.display = "";
       if (readiness.hasProfile) {
         this._feedbackProfileButton.title = "已累计 " + readiness.count +
-          " 篇唯一论文评价。打开猜你喜欢画像配置，可查看、修改或替换已保存的反馈画像。";
+          " 篇唯一论文评价。已启用自动更新；打开猜你喜欢画像配置，可查看、修改或替换已保存的反馈画像。";
       } else {
         this._feedbackProfileButton.title = "已累计 " + readiness.count +
-          " 篇唯一论文评价，已自动准备猜你喜欢画像草稿。点击打开配置；草稿需手动保存后才会生效。";
+          " 篇唯一论文评价，正在或已经准备 LLM 合成的猜你喜欢画像草稿。首次手动保存后，后续评价将自动更新并保存。";
+        var draftText = readText(FEEDBACK_PROFILE_DRAFT_PATH);
+        if (!isUsableFeedbackProfile(draftText) || /等待 LLM 合成/.test(draftText)) {
+          this._scheduleFeedbackProfileUpdate("feedback-ready", false);
+        }
       }
     },
 
     _openFeedbackProfileConfig: function () {
-      ensureFeedbackProfileDraft(this._loadFeedbackIndex());
+      var readiness = ensureFeedbackProfileDraft(this._loadFeedbackIndex());
+      var openWindow = function () {
+        try {
+          var win = typeof Zotero !== "undefined" && Zotero.getMainWindow ? Zotero.getMainWindow() : ArxivDailyCenterWorkspace._win;
+          if (win && typeof ArxivDailyProfileWindow !== "undefined") {
+            ArxivDailyProfileWindow.open(win, {
+              mode: "feedback",
+              focus: "feedback",
+              applyFeedbackDraft: true,
+            });
+            return true;
+          }
+          if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.manageProfile) {
+            ArxivDailyActions.manageProfile(null, "feedback");
+            return true;
+          }
+        } catch (err) {
+          logError("open feedback profile config failed: " + (err.message || err));
+        }
+        return false;
+      };
+      var draftText = readText(FEEDBACK_PROFILE_DRAFT_PATH);
+      if (readiness.ready && !readiness.hasProfile &&
+          (!isUsableFeedbackProfile(draftText) || /等待 LLM 合成/.test(draftText))) {
+        this._flashFeedbackStatus("正在合成猜你喜欢画像草稿");
+        this._refreshFeedbackProfileFromRatings("open-feedback-profile").then(function () {
+          openWindow();
+        }).catch(function (err) {
+          logError("feedback profile draft before open failed: " + (err.message || err));
+          openWindow();
+        });
+        return true;
+      }
       try {
-        var win = typeof Zotero !== "undefined" && Zotero.getMainWindow ? Zotero.getMainWindow() : this._win;
-        if (win && typeof ArxivDailyProfileWindow !== "undefined") {
-          ArxivDailyProfileWindow.open(win, {
-            mode: "feedback",
-            focus: "feedback",
-            applyFeedbackDraft: true,
-          });
-          return true;
-        }
-        if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.manageProfile) {
-          ArxivDailyActions.manageProfile(null, "feedback");
-          return true;
-        }
+        return openWindow();
       } catch (err) {
         logError("open feedback profile config failed: " + (err.message || err));
       }
@@ -2682,6 +3077,7 @@
         };
         this._saveFeedbackIndex();
       }
+      this._scheduleFeedbackProfileUpdate("submit-today-feedback", false);
       this._flashFeedbackStatus("今日评价已提交");
       return true;
     },
@@ -2696,6 +3092,7 @@
       }
       if (index.__submissions) delete index.__submissions[date];
       this._saveFeedbackIndex();
+      this._scheduleFeedbackProfileUpdate("revoke-today-feedback", false);
       this._renderMarkdownReport(this._currentMarkdown, this._currentMeta || {});
       this._flashFeedbackStatus("今日评价已撤回");
       return true;
@@ -3048,6 +3445,7 @@
           papers: [],
         } : null;
         for (var intro = 0; intro < section.intro.length; intro++) {
+          if (!shouldRenderSectionIntro(section.intro[intro], sectionTitle)) continue;
           var introP = doc.createElement("p");
           setText(introP, section.intro[intro]);
           introP.style.cssText = "margin:6px 0;color:GrayText;";
@@ -3234,6 +3632,16 @@
         var feedbackPaper = {
           arxivId: arxivId,
           title: paper.title || paper.heading || "",
+          authors: authors || "",
+          categories: paper.fields["分类"] || "",
+          sectionTitle: paper._sectionTitle || "",
+          score: paper.score || "",
+          tags: paper.tags || [],
+          abstract: paper.fields["摘要"] || paper.abstract.join("\n\n") || "",
+          recommendation: paper.fields["推荐理由"] || "",
+          guessReason: paper.fields["猜你喜欢理由"] || "",
+          readingGuide: paper.fields["长导读"] || "",
+          crossGuide: paper.fields["交叉导读"] || "",
         };
         [
           ["like", "喜欢", "标记为喜欢；再次点击取消"],

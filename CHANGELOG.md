@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.4 - 2026-06-12
+
+- Changed Guess You Like feedback drafts from rating logs into LLM-synthesized preference profiles; raw rating evidence is kept separately as a feedback record.
+- Enabled automatic feedback-profile refresh after the user first saves the Guess You Like profile.
+- Hardened report rendering so orphaned LLM guide paragraphs and old feedback-record drafts are not shown as report intro or Guess You Like content.
+
 ## 1.1.3 - 2026-06-11
 
 - Added feedback-profile readiness detection after 5 uniquely rated papers.

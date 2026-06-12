@@ -691,6 +691,35 @@
     return "";
   }
 
+  function looksLikeFeedbackRecord(text) {
+    var value = String(text || "");
+    if (!value.trim()) return false;
+    if (/猜你喜欢科研兴趣画像（待确认草稿）|喜欢的论文信号|一般的论文信号|不喜欢的论文信号|可编辑偏好草稿/.test(value)) return true;
+    if (/猜你喜欢反馈记录|Feedback record/i.test(value) && /##\s*(喜欢|一般|不喜欢)/.test(value)) return true;
+    return false;
+  }
+
+  function looksLikeOrphanGuideText(text) {
+    var value = String(text || "").replace(/\s+/g, " ").trim();
+    if (!value) return false;
+    return /^(这篇论文|本文|这项工作|这个工作|作者|论文的逻辑|论文的论证|核心画面|核心逻辑|这里的关键|关键推进是|他们发现|它们发现|如果我们|反过来说|总的来说|换句话说)/.test(value) && value.length > 45;
+  }
+
+  function usableFeedbackProfile(text) {
+    var value = String(text || "").trim();
+    if (!value) return "";
+    if (value.indexOf("<!-- arxiv-interest-daily:feedback-profile -->") >= 0 && !looksLikeFeedbackRecord(value)) return value;
+    if (looksLikeFeedbackRecord(value)) return "";
+    if (looksLikeOrphanGuideText(value) && !/(偏好|画像|兴趣|推荐|降权|排除|喜欢|不喜欢|主题|方法|平台)/.test(value)) return "";
+    if (!/(偏好|画像|兴趣|推荐|降权|排除|喜欢|不喜欢|主题|方法|平台|observable|method|platform|preference|deprioritize)/i.test(value)) return "";
+    return value;
+  }
+
+  function readFeedbackProfile() {
+    return usableFeedbackProfile(readDataFile("research_interests.feedback.md")) ||
+      usableFeedbackProfile(readDataFile("feedback/research_interests.feedback.md"));
+  }
+
   function paperKey(paper) {
     return baseArxivId(paper && (paper.arxivId || paper.id || paper.paperId)) ||
       String((paper && (paper.title || paper.link || paper.url)) || "");
@@ -1595,8 +1624,7 @@
     _buildGuessYouLike: async function (rankedPapers, config, cancelToken, onProgress) {
       var limit = Math.max(0, Math.min(20, parseInt(config.outputGuessYouLikeN, 10) || 0));
       if (!limit || !rankedPapers || !rankedPapers.length) return [];
-      var feedbackProfile = readDataFile("research_interests.feedback.md") ||
-        readDataFile("feedback/research_interests.feedback.md");
+      var feedbackProfile = readFeedbackProfile();
       if (!String(feedbackProfile || "").trim()) return [];
       if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured(config.llmOptions)) return [];
 
