@@ -1,6 +1,6 @@
 {
   "name": "zotero-arxiv-interest-daily-zotero9",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "private": true,
   "description": "Cross-platform Zotero 9 XPI for personalized arXiv daily reports and LLM-assisted reading.",
   "scripts": {

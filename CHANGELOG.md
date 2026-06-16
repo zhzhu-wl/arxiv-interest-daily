@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.6 - 2026-06-16
+
+- Kept the Guess You Like section visible when a usable feedback profile exists by falling back to local profile-aware ranking if the report LLM is unavailable, returns invalid JSON, or produces an empty selection.
+- Ranked Guess You Like candidates from the broader scored paper pool instead of only the final recommended papers.
+
 ## 1.1.5 - 2026-06-16
 
 - Enabled free text copying in the LLM Q&A sidebar via selection, right-click Copy, and Ctrl/Cmd+C for both questions and answers.

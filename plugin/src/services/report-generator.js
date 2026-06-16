@@ -607,6 +607,108 @@
       ((b.keywordScore || 0) - (a.keywordScore || 0));
   }
 
+  function guessProfileTokens(text) {
+    var value = String(text || "").toLowerCase();
+    var seen = {};
+    var tokens = [];
+    function add(token) {
+      token = String(token || "").trim();
+      if (!token || token.length < 2 || seen[token]) return;
+      seen[token] = true;
+      tokens.push(token);
+    }
+
+    var english = value.match(/[a-z][a-z0-9+.#-]{2,}/g) || [];
+    for (var i = 0; i < english.length; i++) {
+      add(english[i]);
+      if (tokens.length >= 240) return tokens;
+    }
+
+    var stop = {
+      "喜欢": true, "不喜": true, "论文": true, "文章": true, "研究": true,
+      "方向": true, "方法": true, "主题": true, "一般": true, "优先": true,
+      "排除": true, "降低": true, "推荐": true, "画像": true,
+    };
+    var runs = value.match(/[\u4e00-\u9fff]{2,}/g) || [];
+    for (var r = 0; r < runs.length; r++) {
+      var run = runs[r].slice(0, 48);
+      for (var size = 2; size <= 6; size++) {
+        for (var p = 0; p + size <= run.length; p++) {
+          var token = run.slice(p, p + size);
+          if (!stop[token]) add(token);
+          if (tokens.length >= 240) return tokens;
+        }
+      }
+    }
+    return tokens;
+  }
+
+  function guessCandidateText(paper) {
+    return [
+      paper && paper.title,
+      paper && paper.abstract,
+      paper && paper.localizedAbstract,
+      paper && paper.categories,
+      paper && paper.primaryCategory,
+      paper && paper.sourceCategory,
+      paper && paper.llmReason,
+      paper && paper.readingGuide,
+      paper && paper.crossFieldGuide,
+      paper && paper.llmTags ? paper.llmTags.join(" ") : "",
+    ].filter(Boolean).join(" ").toLowerCase();
+  }
+
+  function buildGuessFallback(candidates, feedbackProfile, limit, reason) {
+    if (!limit || !candidates || !candidates.length || !String(feedbackProfile || "").trim()) return [];
+    ensureKeywordScores(candidates);
+    var tokens = guessProfileTokens(feedbackProfile);
+    var scored = [];
+    for (var i = 0; i < candidates.length; i++) {
+      var paper = candidates[i];
+      if (!paper) continue;
+      var text = guessCandidateText(paper);
+      var overlap = 0;
+      var matched = [];
+      for (var t = 0; t < tokens.length; t++) {
+        if (text.indexOf(tokens[t]) >= 0) {
+          overlap++;
+          if (matched.length < 5) matched.push(tokens[t]);
+        }
+      }
+      var keywordScore = parseFloat(paper.keywordScore);
+      if (!Number.isFinite(keywordScore)) keywordScore = 0;
+      var baseScore = scoreOf(paper) || fallbackScore(paper);
+      scored.push({
+        paper: paper,
+        rank: i,
+        score: baseScore * 20 + keywordScore + overlap * 3,
+        baseScore: baseScore,
+        matched: matched,
+      });
+    }
+    scored.sort(function (a, b) {
+      return (b.score - a.score) || (a.rank - b.rank);
+    });
+
+    var out = [];
+    var seen = {};
+    var fallbackReason = reason || "LLM 猜你喜欢排序为空，已按猜你喜欢画像、当前相关性评分和关键词分数兜底排序。";
+    for (var s = 0; s < scored.length && out.length < limit; s++) {
+      var item = scored[s];
+      var key = paperKey(item.paper) || String(s);
+      if (seen[key]) continue;
+      seen[key] = true;
+      item.paper.guessFallback = true;
+      item.paper.guessFallbackReason = fallbackReason;
+      item.paper.guessScore = Math.max(3, Math.min(5, Math.round(item.baseScore || fallbackScore(item.paper))));
+      item.paper.guessReason = item.matched.length
+        ? fallbackReason + " 画像命中: " + item.matched.join("、") + "。"
+        : fallbackReason;
+      out.push(item.paper);
+    }
+    return out;
+  }
+
   function paperMatchesCategories(paper, categories) {
     if (!categories || !categories.length) return false;
     var text = [paper.categories || "", paper.primaryCategory || "", paper.sourceCategory || ""].join("; ");
@@ -1429,13 +1531,19 @@
       }
 
       var guessPapers = [];
-      if (llmConfiguredForReport) {
-        try {
-          guessPapers = await this._buildGuessYouLike(topPapers, config, cancelToken, onProgress);
-        } catch (guessErr) {
-          reportMeta.guessYouLikeWarning = "猜你喜欢区块生成失败，已跳过: " + (guessErr.message || guessErr);
-          emitProgress(onProgress, reportMeta.guessYouLikeWarning, 86);
+      var guessSourcePapers = screened && screened.length ? screened : topPapers;
+      try {
+        guessPapers = await this._buildGuessYouLike(guessSourcePapers, config, cancelToken, onProgress);
+        for (var gpWarn = 0; gpWarn < guessPapers.length; gpWarn++) {
+          if (guessPapers[gpWarn] && guessPapers[gpWarn].guessFallback) {
+            reportMeta.guessYouLikeWarning = guessPapers[gpWarn].guessFallbackReason ||
+              "猜你喜欢 LLM 结果不可用，已按画像和当前评分兜底排序。";
+            break;
+          }
         }
+      } catch (guessErr) {
+        reportMeta.guessYouLikeWarning = "猜你喜欢区块生成失败，已跳过: " + (guessErr.message || guessErr);
+        emitProgress(onProgress, reportMeta.guessYouLikeWarning, 86);
       }
 
       // ── Step 5: Generate markdown report ──────────────────────────────
@@ -1626,10 +1734,14 @@
       if (!limit || !rankedPapers || !rankedPapers.length) return [];
       var feedbackProfile = readFeedbackProfile();
       if (!String(feedbackProfile || "").trim()) return [];
-      if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured(config.llmOptions)) return [];
+      var candidates = rankedPapers.slice(0, 80);
+      var fallbackReason = "LLM 猜你喜欢排序不可用，已按猜你喜欢画像、当前相关性评分和关键词分数兜底排序。";
+      if (typeof ArxivDailyLLM === "undefined" || !ArxivDailyLLM.isConfigured(config.llmOptions)) {
+        emitProgress(onProgress, "猜你喜欢画像已读取，LLM 不可用，使用本地兜底排序", 85);
+        return buildGuessFallback(candidates, feedbackProfile, limit, fallbackReason);
+      }
 
       emitProgress(onProgress, "正在根据猜你喜欢画像重排今日候选", 85);
-      var candidates = rankedPapers.slice(0, 80);
       var papersText = candidates.map(function (paper) {
         return [
           "arxiv_id: " + (paper.arxivId || ""),
@@ -1654,13 +1766,25 @@
         "",
         "Use score 1-5. Only include papers with score >= 3.",
       ].join("\n");
-      var response = await ArxivDailyLLM.complete(
-        "You are ranking today's arXiv papers for a short '猜你喜欢' section. Use the feedback-adjusted profile. Return only valid JSON.",
-        prompt,
-        cancelToken,
-        config.llmOptions
-      );
-      return parseGuessResponse(response, candidates, limit);
+      try {
+        var response = await ArxivDailyLLM.complete(
+          "You are ranking today's arXiv papers for a short '猜你喜欢' section. Use the feedback-adjusted profile. Return only valid JSON.",
+          prompt,
+          cancelToken,
+          config.llmOptions
+        );
+        var selected = parseGuessResponse(response, candidates, limit);
+        if (selected.length) return selected;
+        return buildGuessFallback(
+          candidates,
+          feedbackProfile,
+          limit,
+          "LLM 未返回可用猜你喜欢条目，已按猜你喜欢画像、当前相关性评分和关键词分数兜底排序。"
+        );
+      } catch (err) {
+        logError("guess-you-like LLM ranking failed: " + (err.message || err));
+        return buildGuessFallback(candidates, feedbackProfile, limit, fallbackReason);
+      }
     },
 
     _buildMarkdown: function (dateStr, papers, config, meta, extras) {
