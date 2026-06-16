@@ -168,6 +168,163 @@
     }
   }
 
+  function messageClipboardText(msg) {
+    if (!msg) return "";
+    var parts = [];
+    if (msg.role === "user" && msg.selectedPassage) {
+      parts.push("Selected passage:\n" + cleanText(msg.selectedPassage || ""));
+      if (msg.selectedPassageContext) {
+        parts.push("Located source context:\n" + cleanText(msg.selectedPassageContext || ""));
+      }
+    }
+    if (msg.content) parts.push(cleanText(msg.content || ""));
+    return cleanText(parts.join("\n\n")).trim();
+  }
+
+  function qaIsEditableTarget(target) {
+    try {
+      var el = nodeToElement(target);
+      if (!el) return false;
+      var tag = String(el.localName || el.tagName || "").toLowerCase();
+      return tag === "textarea" || tag === "input" || tag === "select" ||
+        el.isContentEditable ||
+        !!(el.closest && el.closest("textarea,input,select,[contenteditable='true']"));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function qaNodeWithinPanel(node, panel) {
+    try {
+      if (!node || !panel) return false;
+      if (node === panel) return true;
+      if (panel.contains && panel.contains(node)) return true;
+      var el = nodeToElement(node);
+      if (!el) return false;
+      if (el === panel) return true;
+      if (el.closest) return el.closest("#arxiv-daily-qa-sidebar") === panel;
+      while (el) {
+        if (el === panel) return true;
+        el = el.parentNode;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function qaPanelSelectionText(doc) {
+    try {
+      var panel = doc && doc.getElementById ? doc.getElementById("arxiv-daily-qa-sidebar") : null;
+      var win = doc && doc.defaultView;
+      var sel = win && win.getSelection ? win.getSelection() : null;
+      if (!panel || !sel || sel.isCollapsed || !sel.rangeCount) return "";
+      var anchorInside = qaNodeWithinPanel(sel.anchorNode, panel);
+      var focusInside = qaNodeWithinPanel(sel.focusNode, panel);
+      var parts = [];
+      for (var i = 0; i < sel.rangeCount; i++) {
+        var range = sel.getRangeAt(i);
+        if (!range) continue;
+        if (qaNodeWithinPanel(range.commonAncestorContainer, panel) || anchorInside || focusInside) {
+          var text = cleanText(range.toString ? range.toString() : "");
+          if (text) parts.push(text);
+        }
+      }
+      if (!parts.length && (anchorInside || focusInside)) parts.push(cleanText(sel.toString ? sel.toString() : ""));
+      return cleanText(parts.join("\n")).trim();
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function removeQaCopyMenu(doc) {
+    try {
+      var old = doc && doc.getElementById ? doc.getElementById("ari-qa-copy-context-menu") : null;
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    } catch (e) {}
+  }
+
+  function copyQaPanelSelection(event) {
+    var doc = event && event.currentTarget ? event.currentTarget.ownerDocument :
+      (event && event.target && event.target.ownerDocument);
+    var text = qaPanelSelectionText(doc);
+    if (!text) return false;
+    try {
+      if (event && event.clipboardData && event.clipboardData.setData) {
+        event.clipboardData.setData("text/plain", text);
+      }
+    } catch (e) {}
+    var ok = writeClipboardText(text);
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    return ok;
+  }
+
+  function showQaCopyMenu(event) {
+    try {
+      if (!event || qaIsEditableTarget(event.target)) return false;
+      var doc = event.target && event.target.ownerDocument;
+      var panel = doc && doc.getElementById ? doc.getElementById("arxiv-daily-qa-sidebar") : null;
+      var text = qaPanelSelectionText(doc);
+      if (!doc || !panel || !text) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      removeQaCopyMenu(doc);
+      var menu = create(doc, "div", "ari-qa-copy-menu");
+      menu.id = "ari-qa-copy-context-menu";
+      menu.style.left = Math.max(4, event.clientX || 0) + "px";
+      menu.style.top = Math.max(4, event.clientY || 0) + "px";
+      var copy = create(doc, "button", "", "Copy");
+      copy.addEventListener("click", function (clickEvent) {
+        clickEvent.preventDefault();
+        clickEvent.stopPropagation();
+        writeClipboardText(text);
+        removeQaCopyMenu(doc);
+      });
+      menu.appendChild(copy);
+      panel.appendChild(menu);
+      try {
+        (doc.defaultView || mainWindow()).setTimeout(function () {
+          var rect = menu.getBoundingClientRect ? menu.getBoundingClientRect() : null;
+          var vw = (doc.defaultView && doc.defaultView.innerWidth) || 0;
+          var vh = (doc.defaultView && doc.defaultView.innerHeight) || 0;
+          if (rect && vw && rect.right > vw) menu.style.left = Math.max(4, vw - rect.width - 4) + "px";
+          if (rect && vh && rect.bottom > vh) menu.style.top = Math.max(4, vh - rect.height - 4) + "px";
+        }, 0);
+      } catch (e) {}
+      return true;
+    } catch (e2) {
+      return false;
+    }
+  }
+
+  function installQaCopyHandlers(panel) {
+    if (!panel || panel._ariQaCopyHandlersInstalled) return;
+    panel._ariQaCopyHandlersInstalled = true;
+    panel.addEventListener("copy", function (event) {
+      if (qaIsEditableTarget(event && event.target)) return;
+      copyQaPanelSelection(event);
+    }, true);
+    panel.addEventListener("keydown", function (event) {
+      var key = String(event && event.key || "").toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && key === "c" && !qaIsEditableTarget(event.target)) {
+        copyQaPanelSelection(event);
+      } else if (key === "escape") {
+        removeQaCopyMenu(panel.ownerDocument);
+      }
+    }, true);
+    panel.addEventListener("contextmenu", function (event) {
+      showQaCopyMenu(event);
+    }, true);
+    panel.addEventListener("mousedown", function (event) {
+      var menu = panel.ownerDocument && panel.ownerDocument.getElementById("ari-qa-copy-context-menu");
+      if (menu && !qaNodeWithinPanel(event.target, menu)) removeQaCopyMenu(panel.ownerDocument);
+    }, true);
+    panel.addEventListener("scroll", function () {
+      removeQaCopyMenu(panel.ownerDocument);
+    }, true);
+  }
+
   function iconURI() {
     var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="' +
       ICON_COLOR + '" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h16v10.5H8.5L4 20.5z"/><path d="M9 9h6"/><path d="M9 12.5h4"/></svg>';
@@ -2938,6 +3095,7 @@
     var record = makeSelectionRecord(selection);
     if (!record) return null;
     var candidates = [];
+    if (ctx && ctx.readerPageText) candidates.push({ label: "current visible PDF page", text: ctx.readerPageText });
     if (ctx && ctx.reportText) candidates.push({ label: "当前插件阅读页", text: ctx.reportText });
     if (ctx && ctx.contextSearchText) candidates.push({ label: "当前可用全文/条目上下文", text: ctx.contextSearchText });
     if (ctx && ctx.contextText) candidates.push({ label: "已截断上下文", text: ctx.contextText });
@@ -3111,6 +3269,9 @@
     _readerSelectionHandler: null,
     _readerSelectionListenerInstalled: false,
     _lastReaderSelectionCapture: null,
+    _lastContextSnapshot: null,
+    _lastContextSnapshotAt: 0,
+    _lastContextRefreshAt: 0,
 
     init: function () {
       this._scheduleTabButton();
@@ -3767,6 +3928,9 @@
         ".ari-qa-message-tools{display:flex;justify-content:flex-end;gap:5px;margin-top:5px;user-select:none;-moz-user-select:none}",
         ".ari-qa-message-tools button{font-size:11px;border:1px solid ThreeDShadow;border-radius:3px;background:ButtonFace;color:ButtonText;padding:1px 6px;cursor:pointer;user-select:none;-moz-user-select:none}",
         ".ari-qa-message-tools button:hover{background:rgba(0,0,0,.07)}",
+        ".ari-qa-copy-menu{position:fixed;z-index:2147483647;display:block;padding:3px;background:Menu;color:MenuText;border:1px solid ThreeDShadow;border-radius:3px;box-shadow:0 2px 8px rgba(0,0,0,.22);user-select:none;-moz-user-select:none}",
+        ".ari-qa-copy-menu button{display:block;min-width:76px;text-align:left;border:0;background:transparent;color:inherit;padding:4px 10px;border-radius:2px}",
+        ".ari-qa-copy-menu button:hover{background:Highlight;color:HighlightText}",
         ".ari-qa-retry{font-size:11px;border:1px solid ThreeDShadow;border-radius:3px;background:ButtonFace;color:ButtonText;padding:1px 6px}",
         ".ari-qa-user{background:rgba(0,0,0,.07);margin-left:24px}",
         ".ari-qa-assistant{background:rgba(27,110,194,.10);margin-right:12px}",
@@ -3916,6 +4080,7 @@
       panel.appendChild(manager);
       panel.appendChild(messages);
       panel.appendChild(inputBox);
+      installQaCopyHandlers(panel);
 
       this._nodes = {
         back: back,
@@ -4030,6 +4195,55 @@
       return DEPTH_PRESETS[1];
     },
 
+    _contextTabKey: function () {
+      try {
+        var win = mainWindow();
+        var parts = ["tab:" + zoteroTabSignature(win)];
+        if (typeof ArxivDailyCenterWorkspace !== "undefined") {
+          parts.push("report:" + (ArxivDailyCenterWorkspace._currentReportDate || ""));
+          var meta = ArxivDailyCenterWorkspace._currentMeta || {};
+          parts.push("center:" + (meta.arxivId || meta.paperId || meta.title || ""));
+        }
+        return simpleHash(parts.join("|"));
+      } catch (e) {
+        return "";
+      }
+    },
+
+    _contextSnapshotUseful: function (snapshot) {
+      return !!(snapshot && (
+        snapshot.reportText ||
+        snapshot.topTitle ||
+        snapshot.readerItemID ||
+        snapshot.readerTitle ||
+        snapshot.readerPage ||
+        snapshot.readerPageText ||
+        snapshot.selectedItemID ||
+        snapshot.selectedTitle
+      ));
+    },
+
+    _prepareContextSnapshot: function (snapshot) {
+      snapshot = snapshot || {};
+      snapshot.contextKey = this._currentContextKey();
+      snapshot.contextTabKey = this._contextTabKey();
+      if (this._contextSnapshotUseful(snapshot)) {
+        this._lastContextSnapshot = Object.assign({}, snapshot);
+        this._lastContextSnapshotAt = Date.now();
+        return snapshot;
+      }
+      var cached = this._lastContextSnapshot;
+      if (cached && cached.contextTabKey && cached.contextTabKey === snapshot.contextTabKey &&
+          Date.now() - (this._lastContextSnapshotAt || 0) < 10 * 60 * 1000) {
+        return Object.assign({}, cached, {
+          fromRecentContext: true,
+          contextKey: snapshot.contextKey || cached.contextKey || "",
+          contextTabKey: snapshot.contextTabKey || cached.contextTabKey || "",
+        });
+      }
+      return this._prepareContextSnapshot(snapshot);
+    },
+
     _captureContextSeeds: function () {
       var snapshot = {
         reportText: "",
@@ -4122,6 +4336,8 @@
         labels.push(seeds.topKind === "project-paper" ? "最上层项目论文页" : "最上层日报页");
       }
 
+      if (seeds.readerPageText) labels.push("current PDF page");
+
       var remaining = Math.max(8000, limit - chunks.join("\n").length);
       try {
         if (seeds.readerItemID) {
@@ -4151,6 +4367,7 @@
         chunks.push("## Selected Zotero item\nFailed to read full text cache: " + (selectedErr.message || selectedErr));
       }
 
+      if (seeds.fromRecentContext) labels.push("recent same-tab context");
       seeds.contextSearchText = chunks.join("\n\n");
       seeds.contextText = truncateText(seeds.contextSearchText, limit);
       seeds.contextLimit = limit;
@@ -4184,6 +4401,9 @@
           "Original context located by matching the copied selection back into the current document/full-text cache. Use this to disambiguate formulas or special characters in the selected passage:\n" +
           ctx.selectedPassageLocatedSnippet
         );
+      }
+      if (ctx.fromRecentContext) {
+        lines.push("The live Zotero reader handle was temporarily unavailable, so the plugin is using the most recent reading context captured from the same Zotero tab.");
       }
       if (ctx.topTitle) lines.push("Top visible plugin reading page: " + ctx.topTitle);
       if (ctx.readerPage) {
@@ -4581,11 +4801,12 @@
           node.appendChild(think);
         }
         appendPlainMessage(box.ownerDocument, node, msg.content);
-        if ((msg.role === "assistant" && cleanText(msg.content || "")) || (msg.error && msg.retryText)) {
+        var fullCopyText = messageClipboardText(msg);
+        if (fullCopyText || (msg.error && msg.retryText)) {
           var tools = create(box.ownerDocument, "div", "ari-qa-message-tools");
-          if (msg.role === "assistant" && cleanText(msg.content || "")) {
+          if (fullCopyText) {
             var copy = create(box.ownerDocument, "button", "ari-qa-copy", "Copy");
-            copy.title = "Copy this answer";
+            copy.title = msg.role === "user" ? "Copy this question" : "Copy this answer";
             copy.setAttribute("data-message-index", String(i));
             copy.addEventListener("click", function (event) {
               event.preventDefault();
@@ -4593,7 +4814,7 @@
               var index = parseInt(event.currentTarget.getAttribute("data-message-index"), 10);
               var message = ArxivDailyQA._thread && ArxivDailyQA._thread.messages ?
                 ArxivDailyQA._thread.messages[index] : null;
-              var ok = writeClipboardText(message && message.content || "");
+              var ok = writeClipboardText(messageClipboardText(message));
               event.currentTarget.textContent = ok ? "Copied" : "Copy failed";
               var button = event.currentTarget;
               try {
@@ -5112,6 +5333,10 @@
           self._clearPendingSelectionIfContextChanged();
           self._clearPopupIfContextChanged();
           self._installSelectionFrameHandlers();
+          if (self._visible && Date.now() - (self._lastContextRefreshAt || 0) > 1800) {
+            self._lastContextRefreshAt = Date.now();
+            self._refreshContext();
+          }
         } catch (e) {}
       }, 650);
     },

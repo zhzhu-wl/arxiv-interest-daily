@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.5 - 2026-06-16
+
+- Enabled free text copying in the LLM Q&A sidebar via selection, right-click Copy, and Ctrl/Cmd+C for both questions and answers.
+- Added per-message Copy controls to user question bubbles, including selected-passage context when present.
+- Improved Q&A context capture so the sidebar refreshes and reuses the latest same-tab Zotero reader/page snapshot when the active reader handle is temporarily unavailable.
+
 ## 1.1.4 - 2026-06-12
 
 - Changed Guess You Like feedback drafts from rating logs into LLM-synthesized preference profiles; raw rating evidence is kept separately as a feedback record.
