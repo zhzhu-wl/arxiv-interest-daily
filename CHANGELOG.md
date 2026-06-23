@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.7 - 2026-06-23
+
+- When a generated report accidentally contains arXiv papers from multiple dates, the saved report date now uses the latest paper date instead of the most frequent date.
+- Recorded mixed paper dates and their counts in report metadata to make cross-date fetches easier to diagnose.
+
 ## 1.1.6 - 2026-06-16
 
 - Kept the Guess You Like section visible when a usable feedback profile exists by falling back to local profile-aware ranking if the report LLM is unavailable, returns invalid JSON, or produces an empty selection.

@@ -25,7 +25,7 @@ English documentation: [README.md](README.md)
 
 ## 安装
 
-1. 从 GitHub Release 下载 `arxiv-interest-daily-v1.1.6.xpi`。
+1. 从 GitHub Release 下载 `arxiv-interest-daily-v1.1.7.xpi`。
 2. 打开 Zotero。
 3. 进入 `工具 -> 插件`。
 4. 点击齿轮按钮。
@@ -73,7 +73,7 @@ node scripts/build-xpi.js
 生成的 XPI 位于：
 
 ```text
-build/arxiv-interest-daily-v1.1.6.xpi
+build/arxiv-interest-daily-v1.1.7.xpi
 ```
 
 构建脚本会强制 XPI 内部 entry 使用 `/`，并检查 `manifest.json`、`bootstrap.js`、`src/main.js` 等必需文件存在。
@@ -86,7 +86,7 @@ build/arxiv-interest-daily-v1.1.6.xpi
 https://raw.githubusercontent.com/zhzhu-wl/arxiv-interest-daily/main/updates.json
 ```
 
-`npm run build` 会根据当前 manifest 版本和 XPI SHA-256 重新生成 `updates.json`。发布新版本时，将生成的 XPI 上传到对应 GitHub Release，例如 tag `v1.1.6`。
+`npm run build` 会根据当前 manifest 版本和 XPI SHA-256 重新生成 `updates.json`。发布新版本时，将生成的 XPI 上传到对应 GitHub Release，例如 tag `v1.1.7`。
 
 ## 开发注意
 

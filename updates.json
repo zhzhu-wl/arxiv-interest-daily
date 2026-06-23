@@ -3,9 +3,9 @@
     "arxiv-interest-daily@zotero": {
       "updates": [
         {
-          "version": "1.1.6",
-          "update_link": "https://github.com/zhzhu-wl/arxiv-interest-daily/releases/download/v1.1.6/arxiv-interest-daily-v1.1.6.xpi",
-          "update_hash": "sha256:cc84fdf6e19e9328217bb763874aaa666c4690c4dadc0b8b62802bc861e40c38",
+          "version": "1.1.7",
+          "update_link": "https://github.com/zhzhu-wl/arxiv-interest-daily/releases/download/v1.1.7/arxiv-interest-daily-v1.1.7.xpi",
+          "update_hash": "sha256:6788b7dbfd25c28be183b6acd9002311423c2caec53307fe5c37f94e501b7ea1",
           "applications": {
             "zotero": {
               "strict_min_version": "9.0",

@@ -63,18 +63,20 @@
 
   function inferReportDateFromPapers(papers) {
     var counts = {};
-    var best = "";
-    var bestCount = 0;
+    var latest = "";
     for (var i = 0; i < (papers || []).length; i++) {
       var date = paperPublicationDate(papers[i]);
       if (!date) continue;
       counts[date] = (counts[date] || 0) + 1;
-      if (counts[date] > bestCount || (counts[date] === bestCount && date > best)) {
-        best = date;
-        bestCount = counts[date];
-      }
+      if (date > latest) latest = date;
     }
-    return best;
+    var dates = Object.keys(counts).sort();
+    return {
+      date: latest,
+      dates: dates,
+      counts: counts,
+      mixed: dates.length > 1,
+    };
   }
 
   function baseArxivId(value) {
@@ -1296,12 +1298,22 @@
       }
       if (cancelToken && cancelToken.cancelled) throw new Error("cancelled");
 
-      var paperDateStr = inferReportDateFromPapers(allPapers);
+      var paperDateInfo = inferReportDateFromPapers(allPapers);
+      var paperDateStr = paperDateInfo.date;
+      if (paperDateInfo.dates.length) {
+        reportMeta.paperDates = paperDateInfo.dates;
+        reportMeta.paperDateCounts = paperDateInfo.counts;
+      }
+      if (paperDateInfo.mixed) {
+        reportMeta.mixedPaperDates = true;
+        reportMeta.reportDateRule = "latest-paper-date";
+        emitProgress(onProgress, "检测到多日 arXiv 论文，报告命名日期采用最后日期: " + paperDateStr, 29);
+      }
       if (paperDateStr && paperDateStr !== dateStr) {
         reportMeta.requestedDate = dateStr;
         dateStr = paperDateStr;
         reportMeta.date = dateStr;
-        emitProgress(onProgress, "日报日期按抓取论文发表日期校正为: " + dateStr, 29);
+        emitProgress(onProgress, "日报日期按抓取论文最后日期校正为: " + dateStr, 29);
       }
 
       // ── Step 2: Keyword scoring / optional keyword-only pre-filter ─────
@@ -1806,6 +1818,9 @@
       lines.push("- 推荐论文数: " + papers.length);
       if (meta) {
         lines.push("- 抓取论文数: " + (meta.fetchedCount || 0));
+        if (meta.mixedPaperDates && meta.paperDates && meta.paperDates.length) {
+          lines.push("- 日期校正: 检测到多日 arXiv 论文 (" + meta.paperDates.join(", ") + ")，本报告按最后日期 " + dateStr + " 命名");
+        }
         lines.push("- LLM / 关键词筛选候选数: " + (meta.candidateCount || 0));
         if (meta.prefilterSourceCount) {
           lines.push("- 宽松 LLM 预筛: " + meta.prefilterSourceCount + " → " + (meta.prefilterPassedCount || 0) +
