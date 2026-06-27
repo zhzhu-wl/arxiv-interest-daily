@@ -8,6 +8,7 @@ menu.search = 在报告中搜索
 menu.profile = 科研兴趣画像
 menu.qa = 向 LLM 提问
 menu.calendar = 按日历查找
+menu.generate_past = 生成过往日报
 menu.open_data_dir = 打开插件数据目录
 menu.clear_paper_cache = 清除论文缓存
 menu.clear_paper_cache.tooltip = 清除从 arXiv 抓取并用于生成报告的论文信息缓存

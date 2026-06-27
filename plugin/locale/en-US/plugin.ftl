@@ -8,6 +8,7 @@ menu.search = Search Reports
 menu.profile = Research Profile
 menu.qa = Ask LLM
 menu.calendar = Calendar
+menu.generate_past = Generate Past Report
 menu.open_data_dir = Open Plugin Data Directory
 menu.clear_paper_cache = Clear Paper Cache
 menu.clear_paper_cache.tooltip = Clear arXiv paper metadata cached for report generation

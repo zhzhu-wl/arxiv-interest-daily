@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 - 2026-06-26
+
+- Added past-report generation from calendar days without an existing report.
+- Historical generation now reads arXiv announcement archive pages and selects the closest arXiv release date within the target-date lookback window, avoiding API submission-date semantics.
+- Added a `生成过往日报` menu entry under `生成今日报告`.
+
 ## 1.1.7 - 2026-06-23
 
 - When a generated report accidentally contains arXiv papers from multiple dates, the saved report date now uses the latest paper date instead of the most frequent date.

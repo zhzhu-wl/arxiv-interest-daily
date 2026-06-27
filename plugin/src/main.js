@@ -108,6 +108,7 @@
       "ari-btn-qa": true,
       "menu-ari-interests": true,
       "menu-ari-generate": baseReady && profileReady,
+      "menu-ari-generate-past": baseReady && profileReady,
       "menu-ari-qa": true,
     };
     var reason = {
@@ -116,6 +117,7 @@
       "ari-btn-qa": llmReady ? "" : "请先在设置中完成 LLM API Key 和模型配置",
       "menu-ari-interests": "",
       "menu-ari-generate": baseReady ? profileReason() : readinessReason(),
+      "menu-ari-generate-past": baseReady ? profileReason() : readinessReason(),
       "menu-ari-qa": llmReady ? "" : "请先在设置中完成 LLM API Key 和模型配置",
     };
     if (typeof ArxivDailyButtonBar !== "undefined" && ArxivDailyButtonBar.updateReadiness) {
@@ -583,13 +585,16 @@
         return;
       }
 
+      var requestedDate = options.dateStr || "";
+      var taskTitle = requestedDate ? ("生成过往日报: " + requestedDate) : "生成今日报告";
+
       // Switch button bar to stop state
       if (typeof ArxivDailyButtonBar !== "undefined") {
         ArxivDailyButtonBar.setGenerating(true);
       }
 
       // Start task via TaskManager
-      var taskId = ArxivDailyTaskManager.start("generateReport", "生成今日报告", async function (token, onProgress) {
+      var taskId = ArxivDailyTaskManager.start("generateReport", taskTitle, async function (token, onProgress) {
         // Pass cancel token + onProgress to the report generator
         var wrappedToken = { cancelled: false };
         // Link task manager's token
@@ -797,6 +802,38 @@
         var alertWin = Zotero.getMainWindow();
         if (alertWin) alertWin.alert("打开日历失败:\n" + (err.message || err));
       }
+    },
+
+    openPastReportCalendar: function (btn, id, event) {
+      log("openPastReportCalendar");
+      try {
+        var win = Zotero.getMainWindow();
+        if (!win) return;
+        var anchor = btn || (event && event.currentTarget) || null;
+        if (id && id.indexOf("menu-") === 0) {
+          anchor = win.document.getElementById("menu-arxiv-interest-daily") || anchor;
+        }
+        if (typeof ArxivDailyCalendar !== "undefined" && ArxivDailyCalendar.open) {
+          ArxivDailyCalendar.open(win, anchor, { title: "生成过往日报" });
+          return;
+        }
+        win.alert("日历模块尚未加载。");
+      } catch (err) {
+        logError("openPastReportCalendar failed: " + (err.message || err));
+        var alertWin = Zotero.getMainWindow();
+        if (alertWin) alertWin.alert("打开过往日报日历失败:\n" + (err.message || err));
+      }
+    },
+
+    generatePastReport: function (dateStr, options) {
+      options = options || {};
+      if (!dateStr) return;
+      this.generateReport(null, null, {
+        dateStr: dateStr,
+        openAfterGenerate: options.openAfterGenerate !== false,
+        noLLM: !!options.noLLM,
+        modelRef: options.modelRef || "",
+      });
     },
 
     openProgressPanel: function () {

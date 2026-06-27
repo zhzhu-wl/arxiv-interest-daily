@@ -69,6 +69,7 @@
         { id: "menu-ari-interests", labelKey: "menu.interests", action: "configureInterests" },
         { separator: true },
         { id: "menu-ari-generate", labelKey: "menu.generate", action: "generateReport" },
+        { id: "menu-ari-generate-past", labelKey: "menu.generate_past", labelFallback: "生成过往日报", action: "openPastReportCalendar" },
         { id: "menu-ari-progress", labelKey: "menu.progress", labelFallback: "任务进度", action: "openProgressPanel" },
         { separator: true },
         { id: "menu-ari-search", labelKey: "menu.search", action: "searchReports" },
@@ -160,7 +161,7 @@
     },
 
     updateReadiness: function (ready, reason) {
-      const ids = ["menu-ari-interests", "menu-ari-generate", "menu-ari-qa"];
+      const ids = ["menu-ari-interests", "menu-ari-generate", "menu-ari-generate-past", "menu-ari-qa"];
       for (const id of ids) {
         for (const item of this._menuItems) {
           if (item.id !== id) continue;

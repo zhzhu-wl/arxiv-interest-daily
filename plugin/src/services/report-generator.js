@@ -1180,7 +1180,8 @@
     // Main generation pipeline
     generate: async function (dateStr, cancelToken, onProgress, options) {
       options = options || {};
-      dateStr = dateStr || getDateStr();
+      var requestedDateArg = dateStr || "";
+      dateStr = requestedDateArg || getDateStr();
       log("=== Report generation started: " + dateStr + " ===");
       emitProgress(onProgress, "开始生成日报: " + dateStr, 2);
 
@@ -1235,7 +1236,7 @@
       if (typeof ArxivDailyFetcher !== "undefined") {
         try {
           var corePapers = await ArxivDailyFetcher.fetchAnnouncements(
-            config.coreCategories, dateStr, cancelToken, onProgress
+            config.coreCategories, requestedDateArg || null, cancelToken, onProgress
           );
           emitProgress(onProgress, "核心分区抓取完成: " + corePapers.length + " 篇", 18);
 
@@ -1244,7 +1245,7 @@
             log("Fetching cross-category announcements...");
             emitProgress(onProgress, "正在抓取交叉 arXiv 分区: " + config.crossCategories.join(", "), 18);
             crossPapers = await ArxivDailyFetcher.fetchAnnouncements(
-              config.crossCategories, dateStr, cancelToken, onProgress
+              config.crossCategories, requestedDateArg || null, cancelToken, onProgress
             );
             emitProgress(onProgress, "交叉分区抓取完成: " + crossPapers.length + " 篇", 20);
           }

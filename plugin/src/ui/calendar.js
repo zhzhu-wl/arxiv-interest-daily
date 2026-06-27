@@ -29,6 +29,16 @@
     return String(value).padStart(2, "0");
   }
 
+  function todayStr() {
+    var now = new Date();
+    return now.getFullYear() + "-" + pad2(now.getMonth() + 1) + "-" + pad2(now.getDate());
+  }
+
+  function isWeekend(year, month, day) {
+    var dow = new Date(year, month, day).getDay();
+    return dow === 0 || dow === 6;
+  }
+
   function reportDateMap() {
     var map = {};
     try {
@@ -62,6 +72,9 @@
       ".ari-calendar-day{padding:5px 0;border:1px solid transparent;border-radius:4px;color:GrayText;}",
       ".ari-calendar-day.has-report{cursor:pointer;color:-moz-HyperlinkText;background:rgba(56,117,215,.12);border-color:rgba(56,117,215,.28);}",
       ".ari-calendar-day.has-report:hover{background:Highlight;color:HighlightText;border-color:Highlight;}",
+      ".ari-calendar-day.missing-report{cursor:pointer;color:CanvasText;}",
+      ".ari-calendar-day.missing-report:hover{background:rgba(0,0,0,.055);border-color:rgba(0,0,0,.14);}",
+      ".ari-calendar-day.future{cursor:default;color:GrayText;opacity:.5;}",
       ".ari-calendar-footer{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px;color:GrayText;font-size:12px;}",
     ].join("\n");
     doc.documentElement.appendChild(style);
@@ -72,12 +85,14 @@
     _filterDate: null,
     _year: null,
     _month: null,
+    _title: "按日历查找或生成报告",
     _outsideHandler: null,
     _keyHandler: null,
     _resizeHandler: null,
 
-    open: function (parentWin, anchor) {
+    open: function (parentWin, anchor, options) {
       try {
+        options = options || {};
         var win = parentWin || Zotero.getMainWindow();
         if (!win || !win.document) return;
         if (this._panel && this._panel.parentNode) {
@@ -87,10 +102,11 @@
         var now = new Date();
         this._year = this._year === null ? now.getFullYear() : this._year;
         this._month = this._month === null ? now.getMonth() : this._month;
+        this._title = options.title || "按日历查找或生成报告";
         installStyles(win.document);
         this._panel = createEl(win.document, "div", "ari-calendar-popover");
         this._panel.setAttribute("role", "dialog");
-        this._panel.setAttribute("aria-label", "按日历查找报告");
+        this._panel.setAttribute("aria-label", this._title);
         (win.document.documentElement || win.document.body).appendChild(this._panel);
         this._render(win, anchor);
         this._position(win, anchor);
@@ -109,7 +125,7 @@
       while (panel.firstChild) panel.removeChild(panel.firstChild);
 
       var head = createEl(doc, "div", "ari-calendar-head");
-      head.appendChild(createEl(doc, "div", "ari-calendar-title", "按日历查找报告"));
+      head.appendChild(createEl(doc, "div", "ari-calendar-title", this._title || "按日历查找或生成报告"));
       var close = createEl(doc, "button", "ari-calendar-close", "x");
       close.type = "button";
       close.title = "关闭";
@@ -148,6 +164,7 @@
       });
 
       var reports = reportDateMap();
+      var today = todayStr();
       var daysInMonth = new Date(this._year, this._month + 1, 0).getDate();
       var firstDay = new Date(this._year, this._month, 1).getDay();
       for (var p = 0; p < firstDay; p++) grid.appendChild(createEl(doc, "div"));
@@ -155,7 +172,17 @@
       for (var day = 1; day <= daysInMonth; day++) {
         var dateStr = this._year + "-" + pad2(this._month + 1) + "-" + pad2(day);
         var hasReport = !!reports[dateStr];
-        var cell = createEl(doc, "div", "ari-calendar-day" + (hasReport ? " has-report" : ""), String(day));
+        var future = dateStr > today;
+        var missingReport = !hasReport && !future;
+        var cell = createEl(
+          doc,
+          "div",
+          "ari-calendar-day" +
+            (hasReport ? " has-report" : "") +
+            (missingReport ? " missing-report" : "") +
+            (future ? " future" : ""),
+          String(day)
+        );
         if (hasReport) {
           cell.title = "打开 " + dateStr + " 的报告";
           cell.addEventListener("click", function (date) {
@@ -173,13 +200,30 @@
               }
             };
           }(dateStr));
+        } else if (missingReport) {
+          cell.title = isWeekend(this._year, this._month, day)
+            ? "生成该日报告（该日无论文）"
+            : "生成该日报告";
+          cell.addEventListener("click", function (date) {
+            return function () {
+              self.close();
+              if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.generatePastReport) {
+                ArxivDailyActions.generatePastReport(date);
+              } else if (typeof ArxivDailyActions !== "undefined" && ArxivDailyActions.generateReport) {
+                ArxivDailyActions.generateReport(null, null, {
+                  dateStr: date,
+                  openAfterGenerate: true,
+                });
+              }
+            };
+          }(dateStr));
         }
         grid.appendChild(cell);
       }
       body.appendChild(grid);
 
       var footer = createEl(doc, "div", "ari-calendar-footer");
-      footer.appendChild(createEl(doc, "span", null, "有报告的日期会高亮显示"));
+      footer.appendChild(createEl(doc, "span", null, "有报告的日期会高亮；无报告的过去日期可点击生成。"));
       var clear = createEl(doc, "button", "ari-calendar-action", "退出日期筛选");
       clear.type = "button";
       clear.addEventListener("click", function () {

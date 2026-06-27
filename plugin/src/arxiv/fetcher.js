@@ -355,6 +355,97 @@
     return ARXIV_SITE + "/list/" + encodeURIComponent(category) + "/new?skip=0&show=" + show;
   }
 
+  function normalizeDateStr(value) {
+    var match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return "";
+    var ms = Date.UTC(parseInt(match[1], 10), parseInt(match[2], 10) - 1, parseInt(match[3], 10));
+    if (!Number.isFinite(ms)) return "";
+    var date = new Date(ms);
+    var out = date.getUTCFullYear() + "-" +
+      String(date.getUTCMonth() + 1).padStart(2, "0") + "-" +
+      String(date.getUTCDate()).padStart(2, "0");
+    return out === value ? out : "";
+  }
+
+  function dateMs(dateStr) {
+    var normalized = normalizeDateStr(dateStr);
+    if (!normalized) return NaN;
+    var parts = normalized.split("-");
+    return Date.UTC(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+  }
+
+  function dateStrFromMs(ms) {
+    var date = new Date(ms);
+    return date.getUTCFullYear() + "-" +
+      String(date.getUTCMonth() + 1).padStart(2, "0") + "-" +
+      String(date.getUTCDate()).padStart(2, "0");
+  }
+
+  function historyDateWindow(targetDate) {
+    var targetMs = dateMs(targetDate);
+    var daysBack = Math.round(getNumberCfg("arxiv.daysBack", 3, 1, 365));
+    return {
+      targetDate: targetDate,
+      startDate: dateStrFromMs(targetMs - daysBack * DAY_MS),
+      endDate: targetDate,
+      daysBack: daysBack,
+    };
+  }
+
+  function monthKeysForWindow(win) {
+    var keys = [];
+    var start = new Date(dateMs(win.startDate));
+    var end = new Date(dateMs(win.endDate));
+    var y = start.getUTCFullYear();
+    var m = start.getUTCMonth();
+    var endKey = end.getUTCFullYear() + "-" + String(end.getUTCMonth() + 1).padStart(2, "0");
+
+    while (true) {
+      var key = y + "-" + String(m + 1).padStart(2, "0");
+      keys.push(key);
+      if (key === endKey) break;
+      m++;
+      if (m > 11) {
+        m = 0;
+        y++;
+      }
+    }
+    return keys;
+  }
+
+  function announcementArchiveUrl(category, monthKey) {
+    var show = Math.round(getNumberCfg("arxiv.announcementPageSize", 1000, 100, 2000));
+    var parts = String(monthKey || "").split("-");
+    var yy = String(parseInt(parts[0], 10) % 100).padStart(2, "0");
+    var mm = String(parseInt(parts[1], 10)).padStart(2, "0");
+    return ARXIV_SITE + "/list/" + encodeURIComponent(category) + "/" + yy + mm + "?skip=0&show=" + show;
+  }
+
+  function filterByAnnouncementWindow(papers, win) {
+    var inWindow = [];
+    var selectedDate = "";
+    for (var i = 0; i < papers.length; i++) {
+      var date = papers[i].announcementDate || "";
+      if (!date || date < win.startDate || date > win.endDate) continue;
+      inWindow.push(papers[i]);
+      if (!selectedDate || date > selectedDate) selectedDate = date;
+    }
+    if (!selectedDate) {
+      return {
+        papers: [],
+        selectedDate: "",
+        inWindowCount: inWindow.length,
+      };
+    }
+    return {
+      papers: inWindow.filter(function (paper) {
+        return paper.announcementDate === selectedDate;
+      }),
+      selectedDate: selectedDate,
+      inWindowCount: inWindow.length,
+    };
+  }
+
   function monthNumber(monthName) {
     var key = String(monthName || "").slice(0, 3).toLowerCase();
     var idx = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"].indexOf(key);
@@ -639,7 +730,67 @@
 
   globalThis.ArxivDailyFetcher = {
 
-    fetchAnnouncements: async function (categories, dateStrIgnored, cancelToken, progressCallback) {
+    fetchAnnouncementWindow: async function (categories, targetDate, cancelToken, progressCallback) {
+      var normalizedTarget = normalizeDateStr(targetDate);
+      if (!normalizedTarget) throw new Error("Invalid target arXiv announcement date: " + targetDate);
+
+      var win = historyDateWindow(normalizedTarget);
+      var months = monthKeysForWindow(win);
+      var allPapers = [];
+      var retryMax = getNumberCfg("arxiv.retryMax", 2, 0, 10);
+      var intervalMs = getNumberCfg("arxiv.requestIntervalMs", 3000, 0, 120000);
+
+      notifyProgress(
+        progressCallback,
+        "Fetching arXiv announcement window " + win.startDate + " to " + win.endDate,
+        15
+      );
+
+      for (var i = 0; i < categories.length; i++) {
+        if (cancelToken && cancelToken.cancelled) break;
+        var cat = categories[i];
+        for (var m = 0; m < months.length; m++) {
+          if (cancelToken && cancelToken.cancelled) break;
+          var url = announcementArchiveUrl(cat, months[m]);
+
+          log("fetching historical announcement: " + url);
+          notifyProgress(progressCallback, "Fetching arXiv papers", 15);
+          try {
+            var html = await fetchTextProtected(url, "announcement", retryMax, cancelToken, progressCallback);
+            var papers = parseAnnouncementHTML(html, cat);
+            log("  -> " + papers.length + " raw historical announcement entries from " + cat + " " + months[m]);
+            notifyProgress(progressCallback, "Announcement " + cat + " " + months[m] + ": " + papers.length + " raw entries", 15);
+            allPapers = allPapers.concat(papers);
+          } catch (e) {
+            logError("historical announcement fetch failed: " + cat + " " + months[m] + " - " + (e.message || e));
+          }
+
+          if (!(i === categories.length - 1 && m === months.length - 1)) {
+            await sleepCancellable(intervalMs, cancelToken);
+          }
+        }
+      }
+
+      var unique = dedupePapers(allPapers);
+      var filtered = filterByAnnouncementWindow(unique, win);
+      log("historical announcement window selected " + (filtered.selectedDate || "none") +
+        " for target " + win.targetDate + " from " + filtered.inWindowCount + " in-window entries");
+      notifyProgress(
+        progressCallback,
+        filtered.selectedDate
+          ? "Selected arXiv announcement date " + filtered.selectedDate + " for target " + win.targetDate
+          : "No arXiv announcement entries found from " + win.startDate + " to " + win.endDate,
+        22
+      );
+      return filtered.papers;
+    },
+
+    fetchAnnouncements: async function (categories, dateStr, cancelToken, progressCallback) {
+      var explicitDate = normalizeDateStr(dateStr);
+      if (explicitDate) {
+        return this.fetchAnnouncementWindow(categories, explicitDate, cancelToken, progressCallback);
+      }
+
       var dateSource = String(getCfg("arxiv.dateSource", "announcement") || "announcement").toLowerCase();
       var dateFilter = String(getCfg("arxiv.dateFilter", "latest") || "latest").toLowerCase();
       if (dateSource === "api" || dateFilter === "rolling") {
