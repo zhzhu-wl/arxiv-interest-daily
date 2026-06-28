@@ -70,9 +70,9 @@
       ".ari-calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;text-align:center;font-size:12px;}",
       ".ari-calendar-week{font-weight:600;color:GrayText;padding:4px 0;}",
       ".ari-calendar-day{padding:5px 0;border:1px solid transparent;border-radius:4px;color:GrayText;}",
-      ".ari-calendar-day.has-report{cursor:pointer;color:-moz-HyperlinkText;background:rgba(56,117,215,.12);border-color:rgba(56,117,215,.28);}",
+      ".ari-calendar-day.has-report{cursor:pointer!important;color:-moz-HyperlinkText;background:rgba(56,117,215,.12);border-color:rgba(56,117,215,.28);}",
       ".ari-calendar-day.has-report:hover{background:Highlight;color:HighlightText;border-color:Highlight;}",
-      ".ari-calendar-day.missing-report{cursor:pointer;color:CanvasText;}",
+      ".ari-calendar-day.missing-report{cursor:pointer!important;color:CanvasText;}",
       ".ari-calendar-day.missing-report:hover{background:rgba(0,0,0,.055);border-color:rgba(0,0,0,.14);}",
       ".ari-calendar-day.future{cursor:default;color:GrayText;opacity:.5;}",
       ".ari-calendar-footer{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:10px;color:GrayText;font-size:12px;}",
@@ -184,6 +184,9 @@
           String(day)
         );
         if (hasReport) {
+          cell.style.cursor = "pointer";
+          cell.setAttribute("role", "button");
+          cell.setAttribute("tabindex", "0");
           cell.title = "打开 " + dateStr + " 的报告";
           cell.addEventListener("click", function (date) {
             return function () {
@@ -201,6 +204,9 @@
             };
           }(dateStr));
         } else if (missingReport) {
+          cell.style.cursor = "pointer";
+          cell.setAttribute("role", "button");
+          cell.setAttribute("tabindex", "0");
           cell.title = isWeekend(this._year, this._month, day)
             ? "生成该日报告（该日无论文）"
             : "生成该日报告";

@@ -2,9 +2,10 @@
  * arxiv/fetcher.js - arXiv announcement and API fetching
  *
  * Primary strategy follows the desktop Python project:
- *   1. Read /list/{category}/new?skip=0&show=N announcement pages.
- *   2. Keep the latest announcement date and requested sections.
- *   3. Fetch full metadata from the arXiv API by ID list.
+ *   1. Read /list/{category}/new?skip=0&show=N announcement pages for today.
+ *   2. Read /catchup?subject={category}&date=YYYY-MM-DD for past reports.
+ *   3. Keep the nearest arXiv publication date and requested sections.
+ *   4. Fetch full metadata from the arXiv API by ID list.
  *
  * If announcement pages fail or parse to zero papers, fall back to the arXiv
  * API submittedDate query so report generation does not stop at an empty page.
@@ -313,7 +314,7 @@
     if (cacheKind === "announcement") {
       return /arxiv/i.test(text) &&
         (/<h3\b/i.test(text) || /<dl\b/i.test(text) || /\/abs\//i.test(text) ||
-         /no\s+(new\s+)?submissions/i.test(text));
+         /catchup\s+results/i.test(text) || /no\s+(new\s+)?submissions/i.test(text));
     }
     if (cacheKind === "api-search" || cacheKind === "api-id-list") {
       return /<feed[\s>]/i.test(text) && /<\/feed>/i.test(text);
@@ -355,6 +356,11 @@
     return ARXIV_SITE + "/list/" + encodeURIComponent(category) + "/new?skip=0&show=" + show;
   }
 
+  function catchupUrl(category, dateStr) {
+    return ARXIV_SITE + "/catchup?subject=" + encodeURIComponent(category) +
+      "&date=" + encodeURIComponent(dateStr);
+  }
+
   function normalizeDateStr(value) {
     var match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
     if (!match) return "";
@@ -392,33 +398,14 @@
     };
   }
 
-  function monthKeysForWindow(win) {
-    var keys = [];
-    var start = new Date(dateMs(win.startDate));
-    var end = new Date(dateMs(win.endDate));
-    var y = start.getUTCFullYear();
-    var m = start.getUTCMonth();
-    var endKey = end.getUTCFullYear() + "-" + String(end.getUTCMonth() + 1).padStart(2, "0");
-
-    while (true) {
-      var key = y + "-" + String(m + 1).padStart(2, "0");
-      keys.push(key);
-      if (key === endKey) break;
-      m++;
-      if (m > 11) {
-        m = 0;
-        y++;
-      }
+  function datesForWindowNewestFirst(win) {
+    var dates = [];
+    var startMs = dateMs(win.startDate);
+    var endMs = dateMs(win.endDate);
+    for (var ms = endMs; ms >= startMs; ms -= DAY_MS) {
+      dates.push(dateStrFromMs(ms));
     }
-    return keys;
-  }
-
-  function announcementArchiveUrl(category, monthKey) {
-    var show = Math.round(getNumberCfg("arxiv.announcementPageSize", 1000, 100, 2000));
-    var parts = String(monthKey || "").split("-");
-    var yy = String(parseInt(parts[0], 10) % 100).padStart(2, "0");
-    var mm = String(parseInt(parts[1], 10)).padStart(2, "0");
-    return ARXIV_SITE + "/list/" + encodeURIComponent(category) + "/" + yy + mm + "?skip=0&show=" + show;
+    return dates;
   }
 
   function filterByAnnouncementWindow(papers, win) {
@@ -514,7 +501,7 @@
   // Announcement HTML parser
   // ------------------------------------------------------------------------
 
-  function parseAnnouncementHTML(html, category) {
+  function parseAnnouncementHTML(html, category, forcedAnnouncementDate) {
     var allPapers = [];
     var sectionRegex = /<h3\b[^>]*>([\s\S]*?)<\/h3>([\s\S]*?)(?=<h3\b[^>]*>|<\/main>|<\/body>|$)/gi;
     var sections = [];
@@ -527,7 +514,7 @@
       sections.push({ header: "", body: html });
     }
 
-    var currentDate = "";
+    var currentDate = normalizeDateStr(forcedAnnouncementDate) || "";
     for (var s = 0; s < sections.length; s++) {
       var header = sections[s].header;
       var body = sections[s].body;
@@ -537,7 +524,7 @@
       var sectionKind = sectionKindFromHeader(header);
       if (!sectionIsIncluded(sectionKind)) continue;
 
-      var announcementDate = headerDate || currentDate;
+      var announcementDate = normalizeDateStr(forcedAnnouncementDate) || headerDate || currentDate;
       var seenInSection = {};
       var entryRegex = /<dt\b[\s\S]*?href\s*=\s*["'](?:https?:\/\/arxiv\.org)?\/abs\/([^"'#?]+)(?:[?#][^"']*)?["'][\s\S]*?<\/dt>\s*<dd\b[^>]*>([\s\S]*?)<\/dd>/gi;
       var match;
@@ -735,8 +722,10 @@
       if (!normalizedTarget) throw new Error("Invalid target arXiv announcement date: " + targetDate);
 
       var win = historyDateWindow(normalizedTarget);
-      var months = monthKeysForWindow(win);
-      var allPapers = [];
+      var dates = datesForWindowNewestFirst(win);
+      var selectedPapers = [];
+      var selectedDate = "";
+      var fetchedEntries = 0;
       var retryMax = getNumberCfg("arxiv.retryMax", 2, 0, 10);
       var intervalMs = getNumberCfg("arxiv.requestIntervalMs", 3000, 0, 120000);
 
@@ -746,43 +735,53 @@
         15
       );
 
-      for (var i = 0; i < categories.length; i++) {
+      for (var d = 0; d < dates.length; d++) {
         if (cancelToken && cancelToken.cancelled) break;
-        var cat = categories[i];
-        for (var m = 0; m < months.length; m++) {
-          if (cancelToken && cancelToken.cancelled) break;
-          var url = announcementArchiveUrl(cat, months[m]);
+        var date = dates[d];
+        var dayPapers = [];
 
-          log("fetching historical announcement: " + url);
+        for (var i = 0; i < categories.length; i++) {
+          if (cancelToken && cancelToken.cancelled) break;
+          var cat = categories[i];
+          var url = catchupUrl(cat, date);
+
+          log("fetching historical catchup: " + url);
           notifyProgress(progressCallback, "Fetching arXiv papers", 15);
           try {
             var html = await fetchTextProtected(url, "announcement", retryMax, cancelToken, progressCallback);
-            var papers = parseAnnouncementHTML(html, cat);
-            log("  -> " + papers.length + " raw historical announcement entries from " + cat + " " + months[m]);
-            notifyProgress(progressCallback, "Announcement " + cat + " " + months[m] + ": " + papers.length + " raw entries", 15);
-            allPapers = allPapers.concat(papers);
+            var papers = parseAnnouncementHTML(html, cat, date);
+            fetchedEntries += papers.length;
+            log("  -> " + papers.length + " raw historical catchup entries from " + cat + " " + date);
+            notifyProgress(progressCallback, "Announcement " + cat + " " + date + ": " + papers.length + " raw entries", 15);
+            dayPapers = dayPapers.concat(papers);
           } catch (e) {
-            logError("historical announcement fetch failed: " + cat + " " + months[m] + " - " + (e.message || e));
+            logError("historical catchup fetch failed: " + cat + " " + date + " - " + (e.message || e));
           }
 
-          if (!(i === categories.length - 1 && m === months.length - 1)) {
+          if (i < categories.length - 1) {
             await sleepCancellable(intervalMs, cancelToken);
           }
         }
+
+        dayPapers = dedupePapers(dayPapers);
+        if (dayPapers.length > 0) {
+          selectedDate = date;
+          selectedPapers = dayPapers;
+          break;
+        }
+        if (d < dates.length - 1) await sleepCancellable(intervalMs, cancelToken);
       }
 
-      var unique = dedupePapers(allPapers);
-      var filtered = filterByAnnouncementWindow(unique, win);
-      log("historical announcement window selected " + (filtered.selectedDate || "none") +
-        " for target " + win.targetDate + " from " + filtered.inWindowCount + " in-window entries");
+      log("historical catchup window selected " + (selectedDate || "none") +
+        " for target " + win.targetDate + " from " + fetchedEntries + " fetched entries");
       notifyProgress(
         progressCallback,
-        filtered.selectedDate
-          ? "Selected arXiv announcement date " + filtered.selectedDate + " for target " + win.targetDate
+        selectedDate
+          ? "Selected arXiv announcement date " + selectedDate + " for target " + win.targetDate
           : "No arXiv announcement entries found from " + win.startDate + " to " + win.endDate,
         22
       );
-      return filtered.papers;
+      return selectedPapers;
     },
 
     fetchAnnouncements: async function (categories, dateStr, cancelToken, progressCallback) {
