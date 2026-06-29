@@ -322,13 +322,61 @@
     return true;
   }
 
-  async function fetchTextProtected(url, cacheKind, retryMax, cancelToken, progressCallback) {
+  function extractAnnouncementDatesFromHTML(text) {
+    var seen = {};
+    var dates = [];
+    var html = String(text || "");
+    var headerRegex = /<(?:h1|h2|h3)\b[^>]*>([\s\S]*?)<\/(?:h1|h2|h3)>/gi;
+    var match;
+
+    function addDate(value) {
+      var date = parseAnnouncementDate(value);
+      if (date && !seen[date]) {
+        seen[date] = true;
+        dates.push(date);
+      }
+    }
+
+    while ((match = headerRegex.exec(html)) !== null) {
+      addDate(match[1] || "");
+    }
+
+    if (dates.length === 0) {
+      addDate(cleanText(html.slice(0, 12000)));
+    }
+
+    return dates.sort();
+  }
+
+  function cacheMatchesRequest(cacheKind, text, context) {
+    context = context || {};
+    if (cacheKind !== "announcement") return true;
+
+    var expectedDate = normalizeDateStr(context.expectedAnnouncementDate);
+    if (!expectedDate) return true;
+
+    var dates = extractAnnouncementDatesFromHTML(text);
+    if (dates.length === 0) {
+      log("ignoring cached arXiv announcement: no parseable publication date for expected " + expectedDate);
+      return false;
+    }
+    if (dates.indexOf(expectedDate) < 0) {
+      log("ignoring cached arXiv announcement: expected date " + expectedDate +
+        ", cached dates " + dates.join(", "));
+      return false;
+    }
+    return true;
+  }
+
+  async function fetchTextProtected(url, cacheKind, retryMax, cancelToken, progressCallback, cacheContext) {
     var key = cacheKind + ":" + url;
     var fresh = cacheGetFresh(key);
-    if (fresh && responseLooksValid(cacheKind, fresh)) {
+    if (fresh && responseLooksValid(cacheKind, fresh) && cacheMatchesRequest(cacheKind, fresh, cacheContext)) {
       log("using cached arXiv response: " + cacheKind);
       notifyProgress(progressCallback, "Using arXiv cache", 18);
       return fresh;
+    } else if (fresh && responseLooksValid(cacheKind, fresh)) {
+      notifyProgress(progressCallback, "Ignoring arXiv cache with mismatched date", 18);
     }
 
     try {
@@ -338,10 +386,12 @@
     } catch (e) {
       if (cancelToken && cancelToken.cancelled) throw e;
       var stale = cacheGetStale(key);
-      if (stale && responseLooksValid(cacheKind, stale)) {
+      if (stale && responseLooksValid(cacheKind, stale) && cacheMatchesRequest(cacheKind, stale, cacheContext)) {
         log("arXiv request failed; using stale cache: " + cacheKind + " (" + (e.message || e) + ")");
         notifyProgress(progressCallback, "Using arXiv cache", 18);
         return stale;
+      } else if (stale && responseLooksValid(cacheKind, stale)) {
+        log("arXiv request failed; stale cache exists but does not match requested date: " + (e.message || e));
       }
       throw e;
     }
@@ -450,6 +500,9 @@
   // arXiv list headers are commonly "Mon, 4 May 2026".
   function parseAnnouncementDate(headerText) {
     var clean = cleanText(headerText);
+    var iso = clean.match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (iso && normalizeDateStr(iso[1])) return iso[1];
+
     var match = clean.match(/\b(?:[A-Z][a-z]+,\s*)?(\d{1,2})\s+([A-Z][a-z]{2,8})\s+(\d{2,4})\b/);
     if (match) {
       return toISODate(
@@ -748,7 +801,9 @@
           log("fetching historical catchup: " + url);
           notifyProgress(progressCallback, "Fetching arXiv papers", 15);
           try {
-            var html = await fetchTextProtected(url, "announcement", retryMax, cancelToken, progressCallback);
+            var html = await fetchTextProtected(url, "announcement", retryMax, cancelToken, progressCallback, {
+              expectedAnnouncementDate: date,
+            });
             var papers = parseAnnouncementHTML(html, cat, date);
             fetchedEntries += papers.length;
             log("  -> " + papers.length + " raw historical catchup entries from " + cat + " " + date);
@@ -801,6 +856,7 @@
       var allPapers = [];
       var retryMax = getNumberCfg("arxiv.retryMax", 2, 0, 10);
       var intervalMs = getNumberCfg("arxiv.requestIntervalMs", 3000, 0, 120000);
+      var expectedAnnouncementDate = targetDateFromConfig();
 
       for (var i = 0; i < categories.length; i++) {
         if (cancelToken && cancelToken.cancelled) break;
@@ -810,7 +866,9 @@
         log("fetching announcement: " + url);
         notifyProgress(progressCallback, "Fetching arXiv papers", 15);
         try {
-          var html = await fetchTextProtected(url, "announcement", retryMax, cancelToken, progressCallback);
+          var html = await fetchTextProtected(url, "announcement", retryMax, cancelToken, progressCallback, {
+            expectedAnnouncementDate: expectedAnnouncementDate,
+          });
           var papers = parseAnnouncementHTML(html, cat);
           log("  -> " + papers.length + " raw announcement entries from " + cat);
           notifyProgress(progressCallback, "Announcement " + cat + ": " + papers.length + " raw entries", 15);
