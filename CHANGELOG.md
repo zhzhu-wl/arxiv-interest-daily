@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.4 - 2026-07-02
+
+- Fixed the LLM API pool add-key form so Provider and API Style use the working custom dropdown control and save the selected values correctly.
+- Updated local and upload release metadata for the 1.2.4 XPI.
+
 ## 1.2.3 - 2026-07-02
 
 - Added a report-generation reasoning effort setting that adapts options to the selected LLM provider and model.

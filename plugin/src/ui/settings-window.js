@@ -222,7 +222,7 @@
 
   function makeSelect(doc, id, options) {
     var wrap = createEl(doc, "div", "ari-select");
-    wrap.id = id;
+    if (id) wrap.id = id;
     wrap.setAttribute("data-value", "");
     var button = createEl(doc, "button", "ari-select-button");
     button.type = "button";
@@ -235,6 +235,9 @@
       option.addEventListener("click", function (event) {
         event.stopPropagation();
         setSelectValue(wrap, this.getAttribute("data-value"));
+        try {
+          wrap.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+        } catch (e) {}
         menu.hidden = true;
       });
       menu.appendChild(option);
@@ -631,15 +634,12 @@
       return el;
     }
     function selectField(name, options, value) {
-      var el = doc.createElement("select");
+      var el = makeSelect(doc, "", options);
       el.setAttribute("data-api-field", name);
-      for (var i = 0; i < options.length; i++) {
-        var opt = doc.createElement("option");
-        opt.value = options[i][0];
-        opt.textContent = options[i][1];
-        el.appendChild(opt);
-      }
-      el.value = value || options[0][0];
+      setSelectValue(el, value || options[0][0]);
+      el.addEventListener("change", function () {
+        refreshUsageSelects(doc);
+      });
       return el;
     }
     labeled("名称", input("name", "text", api.name || "", "DeepSeek 工作号"));
@@ -671,6 +671,9 @@
     for (var i = 0; i < cards.length; i++) {
       function val(name) {
         var el = cards[i].querySelector("[data-api-field='" + name + "']");
+        if (el && el.classList && el.classList.contains("ari-select")) {
+          return cleanConfigText(el.getAttribute("data-value") || "");
+        }
         return el ? cleanConfigText(el.value || "") : "";
       }
       var models = uniqueList(splitModels(val("models")));
