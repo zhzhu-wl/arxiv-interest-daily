@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.5 - 2026-07-02
+
+- Fixed the report generation default model, report reasoning effort, literature search default model, and LLM Q&A default model dropdowns so they use the working custom dropdown control.
+- Updated local and upload release metadata for the 1.2.5 XPI.
+
 ## 1.2.4 - 2026-07-02
 
 - Fixed the LLM API pool add-key form so Provider and API Style use the working custom dropdown control and save the selected values correctly.

@@ -262,6 +262,43 @@
     return wrap;
   }
 
+  function setDynamicSelectOptions(doc, selectEl, options, value) {
+    options = options || [];
+    if (selectEl.classList && selectEl.classList.contains("ari-select")) {
+      var menu = selectEl.querySelector(".ari-select-menu");
+      if (!menu) return;
+      clearNode(menu);
+      for (var i = 0; i < options.length; i++) {
+        var entry = options[i] || {};
+        var optionValue = Array.isArray(entry) ? entry[0] : (entry.value || entry.id || "");
+        var optionLabel = Array.isArray(entry) ? entry[1] : (entry.label || optionValue);
+        var option = createEl(doc, "div", "ari-select-option", optionLabel);
+        option.setAttribute("data-value", optionValue);
+        option.addEventListener("click", function (event) {
+          event.stopPropagation();
+          setSelectValue(selectEl, this.getAttribute("data-value"));
+          try {
+            selectEl.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+          } catch (e) {}
+          menu.hidden = true;
+        });
+        menu.appendChild(option);
+      }
+      setSelectValue(selectEl, value !== undefined ? value : (options.length ? (Array.isArray(options[0]) ? options[0][0] : (options[0].value || options[0].id || "")) : ""));
+      return;
+    }
+
+    clearNode(selectEl);
+    for (var n = 0; n < options.length; n++) {
+      var item = options[n] || {};
+      var opt = doc.createElement("option");
+      opt.value = Array.isArray(item) ? item[0] : (item.value || item.id || "");
+      opt.textContent = Array.isArray(item) ? item[1] : (item.label || opt.value);
+      selectEl.appendChild(opt);
+    }
+    selectEl.value = value !== undefined ? value : (options.length ? (Array.isArray(options[0]) ? options[0][0] : (options[0].value || options[0].id || "")) : "");
+  }
+
   function addField(doc, parent, labelText, control, hint) {
     var row = createEl(doc, "div", "ari-row");
     var label = createEl(doc, "label", null, labelText);
@@ -484,7 +521,7 @@
 
   function reasoningOptionsForReportModel(doc) {
     var usage = doc.getElementById("cfg-usage-report");
-    var ref = usage ? (usage.value || "") : "";
+    var ref = usage ? getVal(doc, "cfg-usage-report") : "";
     if (ref === "__no_llm__") {
       return [{ value: "", label: "不使用 LLM", supported: false }];
     }
@@ -575,6 +612,45 @@
         select.appendChild(opt);
       }
       select.value = current;
+    });
+    refreshReportReasoningSelect(doc);
+  }
+
+  function refreshReportReasoningSelect(doc, preferredValue) {
+    var select = doc.getElementById("cfg-report-reasoning");
+    if (!select) return;
+    var current = normalizeReasoningEffort(
+      preferredValue !== undefined ? preferredValue : (getVal(doc, "cfg-report-reasoning") || select.getAttribute("data-current-value") || "")
+    );
+    var options = reasoningOptionsForReportModel(doc);
+    var hasCurrent = false;
+    var dynamicOptions = [];
+    for (var i = 0; i < options.length; i++) {
+      var value = options[i].value || "";
+      dynamicOptions.push({ value: value, label: options[i].label || value || "Auto" });
+      if (value === current) hasCurrent = true;
+    }
+    setDynamicSelectOptions(doc, select, dynamicOptions, hasCurrent ? current : "");
+    select.setAttribute("data-current-value", getVal(doc, "cfg-report-reasoning") || "");
+    select.title = options.length > 1
+      ? "Current report model supports explicit reasoning effort; leave empty to use the provider/model default."
+      : "No explicit reasoning effort was detected for the current report model.";
+  }
+
+  function refreshUsageSelects(doc) {
+    var models = getAvailableModels(doc);
+    ["report", "search", "qa"].forEach(function (kind) {
+      var select = doc.getElementById("cfg-usage-" + kind);
+      if (!select) return;
+      var current = getVal(doc, "cfg-usage-" + kind) || "";
+      var options = [{ value: "", label: "Use base configuration default model" }];
+      if (kind === "report") {
+        options.push({ value: "__no_llm__", label: "Do not use LLM" });
+      }
+      for (var i = 0; i < models.length; i++) {
+        options.push({ value: models[i].ref, label: models[i].label });
+      }
+      setDynamicSelectOptions(doc, select, options, current);
     });
     refreshReportReasoningSelect(doc);
   }
@@ -699,7 +775,7 @@
   function fillUsageSelect(doc, id, value) {
     refreshUsageSelects(doc);
     var el = doc.getElementById(id);
-    if (el) el.value = value || "";
+    if (el) setVal(doc, id, value || "");
   }
 
   function readDataFileSync(relativePath) {
@@ -1392,21 +1468,17 @@
     apiActions.appendChild(addAPI);
     apiActions.appendChild(refreshModels);
     apiPool.body.appendChild(apiActions);
-    var usageReport = doc.createElement("select");
-    usageReport.id = "cfg-usage-report";
+    var usageReport = makeSelect(doc, "cfg-usage-report", []);
     addField(doc, apiPool.body, "报告生成默认模型", usageReport);
-    var reportReasoning = doc.createElement("select");
-    reportReasoning.id = "cfg-report-reasoning";
+    var reportReasoning = makeSelect(doc, "cfg-report-reasoning", []);
     reportReasoning.addEventListener("change", function () {
-      reportReasoning.setAttribute("data-current-value", reportReasoning.value || "");
+      reportReasoning.setAttribute("data-current-value", getVal(doc, "cfg-report-reasoning") || "");
     });
     addField(doc, apiPool.body, "报告推理强度", reportReasoning,
       "根据报告模型自动显示可用强度；自动表示使用服务商/模型默认值。");
-    var usageSearch = doc.createElement("select");
-    usageSearch.id = "cfg-usage-search";
+    var usageSearch = makeSelect(doc, "cfg-usage-search", []);
     addField(doc, apiPool.body, "文献搜索默认模型", usageSearch);
-    var usageQA = doc.createElement("select");
-    usageQA.id = "cfg-usage-qa";
+    var usageQA = makeSelect(doc, "cfg-usage-qa", []);
     addField(doc, apiPool.body, "LLM 问答默认模型", usageQA);
     ["cfg-llm-provider", "cfg-api-style", "cfg-api-key", "cfg-api-key-env", "cfg-model", "cfg-base-url"].forEach(function (id) {
       var el = doc.getElementById(id);
