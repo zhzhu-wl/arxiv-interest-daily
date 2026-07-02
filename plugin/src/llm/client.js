@@ -208,6 +208,7 @@
           model: model,
           label: (api.name || api.provider || api.id || "API") + " / " + model,
           baseUrl: normalizedBaseURL(Object.assign({}, api, { model: model })),
+          reasoningEfforts: reasoningEffortsForConfig(Object.assign({}, api, { model: model })),
         });
       }
     }
@@ -220,6 +221,12 @@
     var cfg = getConfig();
     var ref = cleanTextValue(options.modelRef || "");
     var kind = usageKey(options.kind || options.usage || "default");
+    if (options.reasoningEffort === undefined && typeof ArxivDailyConfig !== "undefined" && kind !== "default") {
+      var configuredReasoning = cleanTextValue(ArxivDailyConfig.get("llm.reasoning." + kind) || "");
+      if (configuredReasoning) {
+        options = Object.assign({}, options, { reasoningEffort: configuredReasoning });
+      }
+    }
     if (!ref && typeof ArxivDailyConfig !== "undefined" && kind !== "default") {
       ref = cleanTextValue(ArxivDailyConfig.get("llm.usage." + kind) || "");
     }
@@ -275,6 +282,9 @@
     if (options.timeoutSeconds !== undefined) {
       cfg.timeoutSeconds = Math.round(numericValue(options.timeoutSeconds, cfg.timeoutSeconds, 30, 600));
     }
+    if (options.reasoningEffort !== undefined) {
+      cfg.reasoningEffort = normalizeReasoningEffort(options.reasoningEffort);
+    }
     return cfg;
   }
 
@@ -301,6 +311,95 @@
 
   function lower(value) {
     return String(value || "").toLowerCase();
+  }
+
+  const REASONING_EFFORT_LABELS = {
+    none: "None",
+    minimal: "Minimal",
+    low: "Low",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra high",
+  };
+
+  function normalizeReasoningEffort(value) {
+    var text = cleanTextValue(value || "").toLowerCase().replace(/[\s_]+/g, "-");
+    if (!text || text === "auto" || text === "default" || text === "model-default") return "";
+    if (text === "x-high" || text === "extra-high" || text === "extra_high") return "xhigh";
+    if (text === "none" || text === "minimal" || text === "low" ||
+        text === "medium" || text === "high" || text === "xhigh") {
+      return text;
+    }
+    return "";
+  }
+
+  function isOpenAIReasoningModel(cfg) {
+    var model = lower(cfg && cfg.model);
+    var provider = lower(cfg && cfg.provider);
+    var style = lower(cfg && cfg.apiStyle);
+    if (!model || provider === "deepseek" || provider === "anthropic" || style === "anthropic") return false;
+    return /^(o[134](?:[-.]|$)|o\d(?:[-.]|$)|gpt-5(?:[-.]|$)|gpt-5$)/i.test(model);
+  }
+
+  function openAIReasoningEfforts(cfg) {
+    var model = lower(cfg && cfg.model);
+    if (!isOpenAIReasoningModel(cfg)) return [];
+    if (/gpt-5(?:[-.]|_)pro/.test(model)) return ["high"];
+    if (/gpt-5(?:[-.]|_)1/.test(model)) return ["none", "low", "medium", "high"];
+    var efforts = ["minimal", "low", "medium", "high"];
+    if (/codex|max/.test(model)) efforts.push("xhigh");
+    return efforts;
+  }
+
+  function anthropicReasoningEfforts(cfg) {
+    var model = lower(cfg && cfg.model);
+    if (!model || !isAnthropicStyle(cfg)) return [];
+    if (!/claude-(3[-.]?7|sonnet-4|opus-4|haiku-4|4|sonnet-5|opus-5|haiku-5)/.test(model)) return [];
+    return ["low", "medium", "high"];
+  }
+
+  function reasoningEffortsForConfig(cfg) {
+    var openAI = openAIReasoningEfforts(cfg);
+    if (openAI.length) return openAI;
+    return anthropicReasoningEfforts(cfg);
+  }
+
+  function reasoningEffortEntriesForConfig(cfg) {
+    var efforts = reasoningEffortsForConfig(cfg);
+    return efforts.map(function (effort) {
+      return {
+        id: effort,
+        value: effort,
+        label: REASONING_EFFORT_LABELS[effort] || effort,
+      };
+    });
+  }
+
+  function anthropicThinkingBudget(effort, maxTokens) {
+    maxTokens = Math.round(numericValue(maxTokens, 32768, 1, 1000000));
+    if (maxTokens <= 1024) return 0;
+    var requested = effort === "low" ? 2048 : (effort === "high" ? 12000 : 6000);
+    var cap = Math.max(1024, maxTokens - 1);
+    return Math.max(1024, Math.min(requested, cap));
+  }
+
+  function addReasoningToBody(body, cfg, anthropic) {
+    var effort = normalizeReasoningEffort(cfg && cfg.reasoningEffort);
+    if (!effort) return false;
+    var supported = reasoningEffortsForConfig(cfg);
+    if (supported.indexOf(effort) < 0) return false;
+    if (!anthropic) {
+      body.reasoning_effort = effort;
+      return true;
+    }
+    var budget = anthropicThinkingBudget(effort, cfg && cfg.maxTokens);
+    if (!budget) return false;
+    body.thinking = {
+      type: "enabled",
+      budget_tokens: budget,
+    };
+    delete body.temperature;
+    return true;
   }
 
   function isAnthropicStyle(cfg) {
@@ -543,6 +642,7 @@
     if (anthropic && normalized.system) {
       body.system = normalized.system;
     }
+    addReasoningToBody(body, cfg, anthropic);
 
     return JSON.stringify(body);
   }
@@ -625,6 +725,13 @@
       /temperature|unsupported|extra_forbidden|unknown field|invalid parameter/i.test(msg);
   }
 
+  function shouldRetryWithoutReasoning(err, cfg) {
+    var msg = String((err && (err.responseText || err.message)) || "");
+    return !!(err && cfg && normalizeReasoningEffort(cfg.reasoningEffort) &&
+      (err.status === 400 || err.status === 422) &&
+      /reasoning|reasoning_effort|thinking|budget_tokens|output_config|effort/i.test(msg));
+  }
+
   function shouldRetryWithoutStreaming(err) {
     var msg = String((err && (err.responseText || err.message)) || "");
     return err && (err.status === 400 || err.status === 404 || err.status === 415 ||
@@ -653,6 +760,17 @@
         } catch (fallbackErr) {
           fallbackErr.message = fallbackErr.message + "\nOpenAI-compatible fallback after Anthropic 404 also failed. Original error: " + (err.message || err);
           throw fallbackErr;
+        }
+      }
+      if (shouldRetryWithoutReasoning(err, cfg)) {
+        var noReasoningCfg = Object.assign({}, cfg);
+        delete noReasoningCfg.reasoningEffort;
+        try {
+          log("LLM endpoint rejected reasoning effort; retrying once without reasoning options");
+          return await postCompletionJSON(noReasoningCfg, systemPrompt, userMessages, stream);
+        } catch (reasoningErr) {
+          reasoningErr.message = reasoningErr.message + "\nRetry without reasoning options also failed. Original error: " + (err.message || err);
+          throw reasoningErr;
         }
       }
       if (shouldRetryWithoutTemperature(err)) {
@@ -840,6 +958,7 @@
         maxTokens: cfg.maxTokens || 32768,
         timeoutSeconds: cfg.timeoutSeconds || 120,
         retryAttempts: cfg.retryAttempts || 3,
+        reasoningEffort: normalizeReasoningEffort(cfg.reasoningEffort || ""),
       };
     },
 
@@ -849,6 +968,13 @@
 
     getAvailableModels: function () {
       return configuredModels();
+    },
+
+    getReasoningEffortOptions: function (options) {
+      var cfg = resolveConfig(options || {});
+      var entries = reasoningEffortEntriesForConfig(cfg || {});
+      var autoLabel = entries.length ? "Auto / model default" : "Auto / no explicit reasoning control";
+      return [{ id: "", value: "", label: autoLabel, supported: entries.length > 0 }].concat(entries);
     },
 
     getUsageModelRef: function (kind) {
@@ -864,6 +990,22 @@
       try {
         if (typeof ArxivDailyConfig === "undefined") return;
         ArxivDailyConfig.set("llm.usage." + usageKey(kind), cleanTextValue(ref || ""));
+      } catch (e) {}
+    },
+
+    getUsageReasoningEffort: function (kind) {
+      try {
+        if (typeof ArxivDailyConfig === "undefined") return "";
+        return normalizeReasoningEffort(ArxivDailyConfig.get("llm.reasoning." + usageKey(kind)) || "");
+      } catch (e) {
+        return "";
+      }
+    },
+
+    setUsageReasoningEffort: function (kind, effort) {
+      try {
+        if (typeof ArxivDailyConfig === "undefined") return;
+        ArxivDailyConfig.set("llm.reasoning." + usageKey(kind), normalizeReasoningEffort(effort || ""));
       } catch (e) {}
     },
 
@@ -1018,6 +1160,7 @@
         if (overrides.model) cfg.model = overrides.model;
         if (overrides.temperature !== undefined) cfg.temperature = overrides.temperature;
         if (overrides.maxTokens) cfg.maxTokens = overrides.maxTokens;
+        if (overrides.reasoningEffort !== undefined) cfg.reasoningEffort = normalizeReasoningEffort(overrides.reasoningEffort);
       }
       try {
         var json = await completeJSONWithAdaptation(cfg, systemPrompt, userMessages, false);
@@ -1045,6 +1188,7 @@
         if (overrides.model) cfg.model = overrides.model;
         if (overrides.temperature !== undefined) cfg.temperature = overrides.temperature;
         if (overrides.maxTokens) cfg.maxTokens = overrides.maxTokens;
+        if (overrides.reasoningEffort !== undefined) cfg.reasoningEffort = normalizeReasoningEffort(overrides.reasoningEffort);
       }
       try {
         var body = buildBody(cfg, systemPrompt, userMessages, true);

@@ -1218,6 +1218,9 @@
       if (!config.reportLocale) config.reportLocale = reportLocaleFromConfig();
       if (options.noLLM) config.selectionMode = "keyword";
       config.llmOptions = (!options.noLLM && options.modelRef) ? { kind: "report", modelRef: options.modelRef } : { kind: "report" };
+      if (!options.noLLM && options.reasoningEffort !== undefined) {
+        config.llmOptions.reasoningEffort = options.reasoningEffort || "";
+      }
       var llmConfiguredForReport = !options.noLLM &&
         typeof ArxivDailyLLM !== "undefined" &&
         ArxivDailyLLM.isConfigured(config.llmOptions);

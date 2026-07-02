@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "arXiv Interest Daily",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Cross-platform Zotero 9 plugin for personalized arXiv screening, reports, and LLM-assisted reading",
   "author": "arXiv Interest Daily Team",
   "homepage_url": "https://github.com/zhzhu-wl/arxiv-interest-daily.git",

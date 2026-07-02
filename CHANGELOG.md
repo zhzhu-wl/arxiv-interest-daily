@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.3 - 2026-07-02
+
+- Added a report-generation reasoning effort setting that adapts options to the selected LLM provider and model.
+- Sends explicit reasoning effort for supported OpenAI-compatible reasoning models and Anthropic thinking models, with a retry fallback when an endpoint rejects the optional field.
+- Updated local and upload release metadata for the 1.2.3 XPI.
+
 ## 1.2.0 - 2026-06-26
 
 - Added past-report generation from calendar days without an existing report.

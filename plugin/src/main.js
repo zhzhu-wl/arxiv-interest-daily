@@ -604,11 +604,14 @@
 
         try {
           var reportModelRef = options.modelRef || (typeof ArxivDailyLLM !== "undefined" && ArxivDailyLLM.getUsageModelRef ? ArxivDailyLLM.getUsageModelRef("report") : "");
+          var reportReasoningEffort = options.reasoningEffort !== undefined ? options.reasoningEffort :
+            (typeof ArxivDailyLLM !== "undefined" && ArxivDailyLLM.getUsageReasoningEffort ? ArxivDailyLLM.getUsageReasoningEffort("report") : "");
           var result = await ArxivDailyReportGenerator.generate(options.dateStr || null, wrappedToken, onProgress, {
             noLLM: !!options.noLLM ||
               (typeof ArxivDailyLLM !== "undefined" && ArxivDailyLLM.getUsageModelRef &&
                 ArxivDailyLLM.getUsageModelRef("report") === "__no_llm__"),
             modelRef: reportModelRef === "__no_llm__" ? "" : reportModelRef,
+            reasoningEffort: reportReasoningEffort,
           });
 
           if (wrappedToken.cancelled) {

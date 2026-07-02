@@ -175,7 +175,7 @@
       advancedTitle: "高级配置参数",
       advanced: [
         ["llm.temperature / maxTokens / timeoutSeconds / retryAttempts", "控制 LLM 输出随机性、单次响应最大输出 token、请求超时和失败重试次数；maxTokens 不是上下文长度。"],
-        ["llm.apis / llm.usage", "配置多个 API 入口，并为报告、搜索、问答分别指定使用哪个模型。"],
+        ["llm.apis / llm.usage / llm.reasoning.report", "配置多个 API 入口，并为报告、搜索、问答分别指定使用模型；支持的模型可单独设置日报推理强度。"],
         ["arxiv.maxResults / daysBack / dateSource / dateFilter", "控制抓取论文数量、回看天数、日期来源和日期过滤策略。"],
         ["arxiv.pageSize / announcementPageSize / requestIntervalMs / retryMax", "控制 arXiv 请求分页、公告页规模、请求间隔与网络重试。"],
         ["screening.selectionMode / keywordPrefilter / keywordMinScore", "选择关键词、LLM 或混合筛选；设置关键词预筛阈值。"],
@@ -240,7 +240,7 @@
       advancedTitle: "Advanced Parameters",
       advanced: [
         ["llm.temperature / maxTokens / timeoutSeconds / retryAttempts", "Controls LLM randomness, maximum output tokens per response, request timeout, and retry count; maxTokens is not context length."],
-        ["llm.apis / llm.usage", "Defines multiple API entries and maps models separately for report, search, and QA."],
+        ["llm.apis / llm.usage / llm.reasoning.report", "Defines multiple API entries, maps models separately for report/search/QA, and controls report reasoning effort when the selected model exposes it."],
         ["arxiv.maxResults / daysBack / dateSource / dateFilter", "Controls candidate count, lookback days, date source, and date filtering."],
         ["arxiv.pageSize / announcementPageSize / requestIntervalMs / retryMax", "Controls arXiv pagination, announcement page size, request interval, and network retries."],
         ["screening.selectionMode / keywordPrefilter / keywordMinScore", "Chooses keyword, LLM, or hybrid screening and sets keyword prefilter threshold."],

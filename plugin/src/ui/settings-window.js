@@ -369,6 +369,8 @@
     var apis = collectAPIEditors(doc);
     var baseModels = splitModels(getVal(doc, "cfg-model"));
     var baseProvider = cleanConfigText(getVal(doc, "cfg-llm-provider"));
+    var baseApiStyle = cleanConfigText(getVal(doc, "cfg-api-style")) || "openai";
+    var baseUrl = cleanConfigText(getVal(doc, "cfg-base-url"));
     var baseKey = cleanConfigText(getVal(doc, "cfg-api-key"));
     var baseKeyEnv = cleanConfigText(getVal(doc, "cfg-api-key-env"));
     if ((baseProvider || baseKey || baseKeyEnv || baseModels.length) && (baseKey || baseKeyEnv) && baseModels.length) {
@@ -376,8 +378,10 @@
         id: "default",
         name: "基础配置 API",
         provider: baseProvider,
+        apiStyle: baseApiStyle,
         apiKey: baseKey,
         apiKeyEnv: baseKeyEnv,
+        baseUrl: baseUrl,
         models: baseModels,
       });
     }
@@ -395,6 +399,12 @@
         out.push({
           ref: ref,
           label: (apis[i].name || apis[i].provider || apis[i].id || "API") + " / " + model,
+          apiId: apis[i].id,
+          apiName: apis[i].name || apis[i].id,
+          provider: apis[i].provider || "",
+          apiStyle: apis[i].apiStyle || "openai",
+          model: model,
+          baseUrl: apis[i].baseUrl || "",
         });
       }
     }
@@ -410,6 +420,132 @@
       }
     } catch (e) {}
     return [];
+  }
+
+  const REASONING_LABELS = {
+    none: "关闭",
+    minimal: "最小",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "极高",
+  };
+
+  function lowerValue(value) {
+    return safeText(value).toLowerCase();
+  }
+
+  function normalizeReasoningEffort(value) {
+    var text = cleanConfigText(value || "").toLowerCase().replace(/[\s_]+/g, "-");
+    if (!text || text === "auto" || text === "default" || text === "model-default") return "";
+    if (text === "x-high" || text === "extra-high" || text === "extra_high") return "xhigh";
+    if (REASONING_LABELS[text]) return text;
+    return "";
+  }
+
+  function findModelInfo(doc, ref) {
+    var models = getAvailableModels(doc);
+    for (var i = 0; i < models.length; i++) {
+      if (models[i].ref === ref) return models[i];
+    }
+    if (!ref && models.length) return models[0];
+    return null;
+  }
+
+  function isAnthropicModelInfo(info) {
+    var provider = lowerValue(info && info.provider);
+    var style = lowerValue(info && info.apiStyle);
+    var baseUrl = lowerValue(info && info.baseUrl);
+    return style === "anthropic" || provider === "anthropic" || /api\.anthropic\.com|\/anthropic(?:\/|$)/i.test(baseUrl);
+  }
+
+  function inferReasoningEfforts(info) {
+    if (!info) return [];
+    if (Array.isArray(info.reasoningEfforts)) return info.reasoningEfforts.slice();
+    var model = lowerValue(info.model || (info.ref && info.ref.split("::").pop()) || "");
+    var provider = lowerValue(info.provider);
+    var style = lowerValue(info.apiStyle);
+    if (isAnthropicModelInfo(info)) {
+      return /claude-(3[-.]?7|sonnet-4|opus-4|haiku-4|4|sonnet-5|opus-5|haiku-5)/.test(model)
+        ? ["low", "medium", "high"]
+        : [];
+    }
+    if (!model || provider === "deepseek" || style === "anthropic") return [];
+    if (!/^(o[134](?:[-.]|$)|o\d(?:[-.]|$)|gpt-5(?:[-.]|$)|gpt-5$)/i.test(model)) return [];
+    if (/gpt-5(?:[-.]|_)pro/.test(model)) return ["high"];
+    if (/gpt-5(?:[-.]|_)1/.test(model)) return ["none", "low", "medium", "high"];
+    var efforts = ["minimal", "low", "medium", "high"];
+    if (/codex|max/.test(model)) efforts.push("xhigh");
+    return efforts;
+  }
+
+  function reasoningOptionsForReportModel(doc) {
+    var usage = doc.getElementById("cfg-usage-report");
+    var ref = usage ? (usage.value || "") : "";
+    if (ref === "__no_llm__") {
+      return [{ value: "", label: "不使用 LLM", supported: false }];
+    }
+    var info = findModelInfo(doc, ref);
+    if (info) {
+      var inferred = inferReasoningEfforts(info);
+      var inferredOut = [{
+        value: "",
+        label: inferred.length ? "自动 / 模型默认" : "自动 / 无显式强度",
+        supported: inferred.length > 0,
+      }];
+      for (var inferredIndex = 0; inferredIndex < inferred.length; inferredIndex++) {
+        inferredOut.push({ value: inferred[inferredIndex], label: REASONING_LABELS[inferred[inferredIndex]] || inferred[inferredIndex], supported: true });
+      }
+      return inferredOut;
+    }
+    try {
+      if (typeof ArxivDailyLLM !== "undefined" && ArxivDailyLLM.getReasoningEffortOptions) {
+        var fromClient = ArxivDailyLLM.getReasoningEffortOptions({ kind: "report", modelRef: ref });
+        if (fromClient && fromClient.length > 1) {
+          return fromClient.map(function (opt, index) {
+            var value = opt.value || opt.id || "";
+            return {
+              value: value,
+              label: index === 0 ? "自动 / 模型默认" : (REASONING_LABELS[value] || opt.label || value),
+              supported: opt.supported !== false,
+            };
+          });
+        }
+      }
+    } catch (e) {}
+    var efforts = inferReasoningEfforts(info);
+    var out = [{
+      value: "",
+      label: efforts.length ? "自动 / 模型默认" : "自动 / 无显式强度",
+      supported: efforts.length > 0,
+    }];
+    for (var i = 0; i < efforts.length; i++) {
+      out.push({ value: efforts[i], label: REASONING_LABELS[efforts[i]] || efforts[i], supported: true });
+    }
+    return out;
+  }
+
+  function refreshReportReasoningSelect(doc, preferredValue) {
+    var select = doc.getElementById("cfg-report-reasoning");
+    if (!select) return;
+    var current = normalizeReasoningEffort(
+      preferredValue !== undefined ? preferredValue : (select.value || select.getAttribute("data-current-value") || "")
+    );
+    var options = reasoningOptionsForReportModel(doc);
+    while (select.firstChild) select.removeChild(select.firstChild);
+    var hasCurrent = false;
+    for (var i = 0; i < options.length; i++) {
+      var opt = doc.createElement("option");
+      opt.value = options[i].value || "";
+      opt.textContent = options[i].label || opt.value || "自动";
+      select.appendChild(opt);
+      if (opt.value === current) hasCurrent = true;
+    }
+    select.value = hasCurrent ? current : "";
+    select.setAttribute("data-current-value", select.value || "");
+    select.title = options.length > 1
+      ? "当前报告模型支持显式推理强度；留空表示使用服务商默认值。"
+      : "当前报告模型没有检测到可用的显式推理强度；将使用模型默认行为。";
   }
 
   function refreshUsageSelects(doc) {
@@ -437,6 +573,7 @@
       }
       select.value = current;
     });
+    refreshReportReasoningSelect(doc);
   }
 
   function syncBaseAPIPreview(doc) {
@@ -745,6 +882,7 @@
     fillUsageSelect(doc, "cfg-usage-report", cfg.get("llm.usage.report") || "");
     fillUsageSelect(doc, "cfg-usage-search", cfg.get("llm.usage.search") || "");
     fillUsageSelect(doc, "cfg-usage-qa", cfg.get("llm.usage.qa") || "");
+    refreshReportReasoningSelect(doc, cfg.get("llm.reasoning.report") || "");
     syncBaseAPIPreview(doc);
 
     setVal(doc, "cfg-locale", cfg.get("ui.locale") || "");
@@ -851,6 +989,7 @@
     cfg.set("llm.usage.report", cleanConfigText(getVal(doc, "cfg-usage-report")));
     cfg.set("llm.usage.search", cleanConfigText(getVal(doc, "cfg-usage-search")));
     cfg.set("llm.usage.qa", cleanConfigText(getVal(doc, "cfg-usage-qa")));
+    cfg.set("llm.reasoning.report", normalizeReasoningEffort(getVal(doc, "cfg-report-reasoning")));
 
     cfg.set("ui.locale", getVal(doc, "cfg-locale"));
     cfg.set("ui.reportLocale", getVal(doc, "cfg-report-locale"));
@@ -1253,6 +1392,13 @@
     var usageReport = doc.createElement("select");
     usageReport.id = "cfg-usage-report";
     addField(doc, apiPool.body, "报告生成默认模型", usageReport);
+    var reportReasoning = doc.createElement("select");
+    reportReasoning.id = "cfg-report-reasoning";
+    reportReasoning.addEventListener("change", function () {
+      reportReasoning.setAttribute("data-current-value", reportReasoning.value || "");
+    });
+    addField(doc, apiPool.body, "报告推理强度", reportReasoning,
+      "根据报告模型自动显示可用强度；自动表示使用服务商/模型默认值。");
     var usageSearch = doc.createElement("select");
     usageSearch.id = "cfg-usage-search";
     addField(doc, apiPool.body, "文献搜索默认模型", usageSearch);
@@ -1270,6 +1416,9 @@
         syncBaseAPIPreview(doc);
         refreshUsageSelects(doc);
       });
+    });
+    usageReport.addEventListener("change", function () {
+      refreshReportReasoningSelect(doc);
     });
     root.appendChild(apiPool.root);
 

@@ -42,6 +42,9 @@
         search: "",
         qa: "",
       },
+      reasoning: {
+        report: "",
+      },
     },
     arxiv: {
       coreCategories: [],
